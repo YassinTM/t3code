@@ -62,6 +62,8 @@ export interface ProviderThreadTurnSnapshot {
 export interface ProviderThreadSnapshot {
   readonly threadId: ThreadId;
   readonly turns: ReadonlyArray<ProviderThreadTurnSnapshot>;
+  /** Provider-native state changed atomically by the thread operation. */
+  readonly resumeCursor?: unknown;
 }
 
 export interface ProviderAdapterShape<TError> {

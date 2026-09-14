@@ -19,6 +19,7 @@ import {
   ServerCliDevelopmentIconTargetMissingError,
   ServerCliExecutableImportError,
 } from "./cliErrors.ts";
+import { copyRequiredBuildAsset } from "./cliBuildAssets.ts";
 
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("../../..", import.meta.url))),
@@ -87,6 +88,10 @@ const buildCmd = Command.make(
           stderr: "inherit",
           shell: false,
         }),
+      );
+      yield* copyRequiredBuildAsset(
+        path.join(serverDir, "src/provider/assets/pi/t3-approvals.ts"),
+        path.join(serverDir, "dist/assets/pi/t3-approvals.ts"),
       );
 
       const webDist = path.join(repoRoot, "apps/web/dist");

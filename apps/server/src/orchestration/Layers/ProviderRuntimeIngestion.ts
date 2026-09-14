@@ -1808,15 +1808,39 @@ const make = Effect.gen(function* () {
         }
       }
 
-      const pauseForUserTurnId =
+      // close the open assistant bubble before tools / approvals so later text
+      // lands in a new segment below the work log instead of appending above it
+      const assistantBoundary =
         event.type === "request.opened" ||
         (event.type === "user-input.requested" && event.payload.responseMode !== "message")
-          ? toTurnId(event.turnId)
-          : undefined;
-      if (pauseForUserTurnId) {
+          ? {
+              turnId: toTurnId(event.turnId),
+              flushTag:
+                event.type === "request.opened"
+                  ? "assistant-delta-flush-on-request-opened"
+                  : "assistant-delta-flush-on-user-input-requested",
+              completeTag:
+                event.type === "request.opened"
+                  ? "assistant-complete-on-request-opened"
+                  : "assistant-complete-on-user-input-requested",
+              finalDeltaTag:
+                event.type === "request.opened"
+                  ? "assistant-delta-finalize-on-request-opened"
+                  : "assistant-delta-finalize-on-user-input-requested",
+            }
+          : event.type === "item.started" && isToolLifecycleItemType(event.payload.itemType)
+            ? {
+                turnId: toTurnId(event.turnId),
+                flushTag: "assistant-delta-flush-on-tool-started",
+                completeTag: "assistant-complete-on-tool-started",
+                finalDeltaTag: "assistant-delta-finalize-on-tool-started",
+              }
+            : undefined;
+      if (assistantBoundary?.turnId) {
+        const boundaryTurnId = assistantBoundary.turnId;
         const hasProjectedMessage = yield* projectionThreadMessages.hasAssistantMessageForTurn({
           threadId: thread.id,
-          turnId: pauseForUserTurnId,
+          turnId: boundaryTurnId,
           streamingOnly: true,
         });
         const streamingMode = yield* resolveResponseStreamingMode(thread.projectId);
@@ -1825,27 +1849,18 @@ const make = Effect.gen(function* () {
             ? yield* flushBufferedAssistantMessagesForTurn({
                 event,
                 threadId: thread.id,
-                turnId: pauseForUserTurnId,
+                turnId: boundaryTurnId,
                 createdAt: now,
-                commandTag:
-                  event.type === "request.opened"
-                    ? "assistant-delta-flush-on-request-opened"
-                    : "assistant-delta-flush-on-user-input-requested",
+                commandTag: assistantBoundary.flushTag,
               })
             : new Set<MessageId>();
         yield* finalizeActiveAssistantSegmentForTurn({
           event,
           threadId: thread.id,
-          turnId: pauseForUserTurnId,
+          turnId: boundaryTurnId,
           createdAt: now,
-          commandTag:
-            event.type === "request.opened"
-              ? "assistant-complete-on-request-opened"
-              : "assistant-complete-on-user-input-requested",
-          finalDeltaCommandTag:
-            event.type === "request.opened"
-              ? "assistant-delta-finalize-on-request-opened"
-              : "assistant-delta-finalize-on-user-input-requested",
+          commandTag: assistantBoundary.completeTag,
+          finalDeltaCommandTag: assistantBoundary.finalDeltaTag,
           hasProjectedMessage,
           flushedMessageIds,
         });

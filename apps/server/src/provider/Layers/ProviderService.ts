@@ -2228,7 +2228,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.thread_id": input.threadId,
         "provider.rollback_turns": input.numTurns,
       });
-      yield* routed.adapter.rollbackThread(routed.threadId, input.numTurns);
+      const rolledBack = yield* routed.adapter.rollbackThread(routed.threadId, input.numTurns);
       const session = (yield* routed.adapter.listSessions()).find(
         (session) => session.threadId === routed.threadId,
       );
@@ -2237,6 +2237,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           { ...session, providerInstanceId: routed.instanceId },
           input.threadId,
         );
+      }
+      if (rolledBack.resumeCursor !== undefined) {
+        yield* directory.upsert({
+          threadId: routed.threadId,
+          provider: routed.adapter.provider,
+          providerInstanceId: routed.instanceId,
+          resumeCursor: rolledBack.resumeCursor,
+        });
       }
       yield* analytics.record("provider.conversation.rolled_back", {
         provider: routed.adapter.provider,

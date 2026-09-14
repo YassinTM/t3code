@@ -2658,6 +2658,58 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("persists rollback-mutated resume state before subsequent recovery", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-rollback-resume-state");
+      const rolledBackResumeCursor = {
+        opaque: "resume-after-rollback",
+      };
+
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: fixtureCwd("project"),
+        runtimeMode: "full-access",
+      });
+      routing.codex.rollbackThread.mockImplementationOnce((rollbackThreadId) =>
+        Effect.gen(function* () {
+          yield* routing.codex.stopSession(rollbackThreadId);
+          return {
+            threadId: rollbackThreadId,
+            turns: [],
+            resumeCursor: rolledBackResumeCursor,
+          };
+        }),
+      );
+
+      yield* provider.rollbackConversation({ threadId, numTurns: 1 });
+
+      const persisted = yield* runtimeRepository.getByThreadId({ threadId });
+      assert.equal(Option.isSome(persisted), true);
+      if (Option.isSome(persisted)) {
+        assert.deepEqual(persisted.value.resumeCursor, rolledBackResumeCursor);
+      }
+
+      yield* routing.codex.stopSession(threadId);
+      routing.codex.startSession.mockClear();
+
+      yield* provider.sendTurn({
+        threadId,
+        input: "recover after rollback",
+        attachments: [],
+      });
+
+      assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      assert.deepEqual(
+        routing.codex.startSession.mock.calls[0]?.[0].resumeCursor,
+        rolledBackResumeCursor,
+      );
+    }),
+  );
+
   it.effect("preserves the persisted binding when stopping a session", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

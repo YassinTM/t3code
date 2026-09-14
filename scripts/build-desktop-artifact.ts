@@ -2679,6 +2679,11 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           url: resolveMockUpdateServerUrl(mockUpdateServerPort),
         },
       ];
+    } else {
+      // Electron Builder 26.15.6 can produce a null publish-config entry when
+      // update metadata is inferred without repository information, then crash
+      // while reading its channel. Local artifacts do not publish updates.
+      buildConfig.publish = null;
     }
   }
 
