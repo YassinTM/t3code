@@ -1,0 +1,366 @@
+name: Fork release
+
+# Fork-only release train for YassinTM/t3code. See FORK.md.
+#
+# - schedule / workflow_dispatch: if upstream published a nightly that `custom`
+#   does not contain yet, merge it into `custom` and push. That push starts the
+#   build below. A merge conflict opens an issue instead.
+# - push to `custom` (an upstream merge or one of your own PRs): build the
+#   Linux server runtime and desktop app and publish a nightly prerelease on
+#   this repository, which the desktop app's update button follows.
+
+on:
+  schedule:
+    # Upstream checks for nightlies at :08 and :38; look shortly after.
+    - cron: "23,53 * * * *"
+  push:
+    branches: [custom]
+  workflow_dispatch:
+    inputs:
+      build:
+        description: "Build and publish the current custom branch even if upstream has nothing new"
+        type: boolean
+        default: false
+
+concurrency:
+  group: fork-release-${{ github.event_name == 'push' && 'build' || 'sync' }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  UPSTREAM_REPO: pingdotgg/t3code
+
+jobs:
+  sync:
+    name: Merge upstream nightly
+    if: github.event_name != 'push' && github.repository != 'pingdotgg/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: read
+      issues: write
+    steps:
+      # A PAT is needed because GITHUB_TOKEN may not push commits that touch
+      # .github/workflows, and its pushes would not start the build run.
+      - name: Check sync token
+        env:
+          FORK_SYNC_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          if [[ -z "$FORK_SYNC_TOKEN" ]]; then
+            echo "::error::Repository secret FORK_SYNC_TOKEN is missing. See FORK.md."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: custom
+          fetch-depth: 0
+          filter: blob:none
+          token: ${{ secrets.FORK_SYNC_TOKEN }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - id: sync
+        name: Merge newest upstream nightly
+        run: .github/fork/fork.sh sync
+
+      - name: Push
+        if: steps.sync.outputs.merged == 'true'
+        run: |
+          git push origin HEAD:custom
+          # `main` mirrors upstream, so it never carries fork commits.
+          git push --force origin "refs/remotes/upstream/main:refs/heads/main"
+
+      - name: Report merge conflict
+        if: failure() && steps.sync.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.sync.outputs.tag }}
+          SHA: ${{ steps.sync.outputs.sha }}
+        run: |
+          title="Upstream merge conflict"
+          body="$(cat <<EOF
+          Merging upstream \`$TAG\` (\`$SHA\`) into \`custom\` conflicts in:
+
+          \`\`\`
+          $(cat "$RUNNER_TEMP/fork-conflicts.txt")
+          \`\`\`
+
+          Resolve it locally:
+
+          \`\`\`
+          git fetch upstream && git checkout custom && git merge $SHA
+          # fix conflicts, commit, push
+          \`\`\`
+
+          Builds stay on the last published version until this is resolved.
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          )"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
+
+      # Upstream workflows arrive with every merge. They expect upstream's
+      # runners and secrets, so keep everything but this train disabled.
+      - name: Disable upstream workflows
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows" --paginate \
+            --jq '.workflows[] | select(.state == "active") | "\(.id) \(.path)"' |
+            while read -r id path; do
+              case "$path" in
+                .github/workflows/fork-release.yml | .github/workflows/release-desktop.yml) ;;
+                *)
+                  echo "Disabling $path"
+                  gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$id/disable"
+                  ;;
+              esac
+            done
+
+  dispatch_build:
+    name: Request build
+    needs: [sync]
+    if: github.event_name == 'workflow_dispatch' && inputs.build && needs.sync.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - run: echo "Building the current custom branch."
+
+  meta:
+    name: Resolve version
+    needs: [dispatch_build]
+    # Runs for pushes to custom, or when a manual run asks for a build.
+    if: |
+      !cancelled() && github.repository != 'pingdotgg/t3code' &&
+      (github.event_name == 'push' || needs.dispatch_build.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      base_tag: ${{ steps.version.outputs.base_tag }}
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: custom
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .github
+
+      - id: ref
+        run: echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --quiet --filter=blob:none upstream main
+
+      - id: version
+        name: Resolve version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/fork/fork.sh version
+
+      - name: Write release notes
+        env:
+          BASE_TAG: ${{ steps.version.outputs.base_tag }}
+          BASE_SHA: ${{ steps.version.outputs.base_sha }}
+        run: |
+          {
+            echo "Custom build of [T3 Code](https://github.com/$UPSTREAM_REPO) for this fork."
+            echo
+            echo "Based on upstream [\`$BASE_TAG\`](https://github.com/$UPSTREAM_REPO/releases/tag/$BASE_TAG), plus everything below."
+            echo
+            echo "### Fork changes"
+            echo
+            changes="$(git log --no-merges --format='- %s (%h)' "upstream/main..HEAD")"
+            echo "${changes:-_None._}"
+          } > release-notes.md
+          cat release-notes.md
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: release-notes.md
+          retention-days: 1
+
+  build_bundle:
+    name: Build JS bundle
+    needs: [meta]
+    if: ${{ !cancelled() && needs.meta.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # T3 Connect is off unless these repository variables are set.
+    env:
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
+      T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install bundle dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "${{ needs.meta.outputs.version }}"
+
+      - uses: ./.github/actions/setup-apt-mirrors
+
+      - name: Install browser secret helper build libraries
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+
+      - name: Build JS bundle
+        run: vp run build:desktop
+
+      - name: Upload JS bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  # linux-x64 provides the server runtime for dev-agent; linux-arm64 provides
+  # the desktop app for asahi. Each also builds its platform's CLI archive.
+  desktop_linux_x64:
+    name: Desktop Linux x64
+    needs: [meta, build_bundle]
+    if: ${{ !cancelled() && needs.build_bundle.result == 'success' }}
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      ref: ${{ needs.meta.outputs.ref }}
+      release_channel: nightly
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ vars.CLERK_PUBLISHABLE_KEY || '' }}
+      clerk_jwt_template: ${{ vars.CLERK_JWT_TEMPLATE || '' }}
+      clerk_cli_oauth_client_id: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID || '' }}
+      relay_url: ${{ vars.RELAY_URL || '' }}
+      label: Linux x64
+      runner: ubuntu-24.04
+      platform: linux
+      target: AppImage
+      arch: x64
+      rust_target: x86_64-unknown-linux-gnu
+      resource_key: linux-x64
+      cli_archive: true
+
+  desktop_linux_arm64:
+    name: Desktop Linux arm64
+    needs: [meta, build_bundle]
+    if: ${{ !cancelled() && needs.build_bundle.result == 'success' }}
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      ref: ${{ needs.meta.outputs.ref }}
+      release_channel: nightly
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ vars.CLERK_PUBLISHABLE_KEY || '' }}
+      clerk_jwt_template: ${{ vars.CLERK_JWT_TEMPLATE || '' }}
+      clerk_cli_oauth_client_id: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID || '' }}
+      relay_url: ${{ vars.RELAY_URL || '' }}
+      label: Linux arm64
+      runner: ubuntu-24.04-arm
+      platform: linux
+      target: AppImage
+      arch: arm64
+      rust_target: aarch64-unknown-linux-gnu
+      resource_key: linux-arm64
+      cli_archive: true
+
+  release:
+    name: Publish fork release
+    needs: [meta, desktop_linux_x64, desktop_linux_arm64]
+    if: ${{ !cancelled() && needs.desktop_linux_x64.result == 'success' && needs.desktop_linux_arm64.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      REF: ${{ needs.meta.outputs.ref }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: release-assets
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: release-assets
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+
+      - name: Write CLI archive checksums
+        run: |
+          set -euo pipefail
+          cd release-assets
+          rm -f builder-debug.yml
+          sha256sum t3-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          ls -la
+
+      - name: Publish release
+        run: |
+          gh release create "$TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$REF" \
+            --title "T3 Code (fork) $VERSION" \
+            --notes-file release-notes.md \
+            --prerelease \
+            --latest=false
+
+      # Each release carries a few hundred MB of installers; keep the newest 10.
+      - name: Prune old fork releases
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[10:] | .[].tagName' |
+            while read -r tag; do
+              echo "Deleting $tag"
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+            done

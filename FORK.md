@@ -1,0 +1,49 @@
+# YassinTM/t3code fork
+
+Upstream T3 Code plus my own changes, with its own nightly releases so the
+desktop app's update button follows this fork.
+
+## Branches
+
+- `main` mirrors `pingdotgg/t3code` `main`. Never commit to it.
+- `custom` is the default branch: upstream plus fork changes. Open PRs against
+  `custom`.
+
+## How releases happen
+
+`.github/workflows/fork-release.yml`:
+
+1. Every 30 minutes it checks for a new upstream nightly. If `custom` doesn't
+   contain it yet, it merges that nightly's commit into `custom` and pushes.
+   A conflict opens an "Upstream merge conflict" issue and nothing ships until
+   it's resolved.
+2. Every push to `custom` (an upstream merge or a merged PR) builds the Linux
+   x64 and arm64 desktop apps and CLI archives and publishes a prerelease here.
+3. Versions look like `0.1.1-nightly.20261016.321801`: upstream nightly run
+   `3218`, fork build `01`. They sort above the upstream nightly they're based
+   on and below the next one. The newest 10 releases are kept.
+
+Run the workflow by hand with **build** checked to publish without an
+upstream change.
+
+## Fork-only changes to upstream files
+
+Keep this list short; each one can conflict with upstream.
+
+- `packages/shared/src/cliRelease.ts`: `CLI_RELEASE_REPOSITORY` points at this
+  fork, so `t3 update` and SSH environments install fork runtimes (tests in
+  `cliRelease.test.ts` and `packages/ssh/src/tunnel.test.ts` updated to match).
+
+Put new features in new files where possible and hook them in with small edits.
+
+## Setup (once)
+
+- Repository secret `FORK_SYNC_TOKEN`: a fine-grained PAT for this repo only,
+  with **Contents: read and write** and **Workflows: read and write**.
+  `GITHUB_TOKEN` can't push merges that touch `.github/workflows`, and its
+  pushes don't start other workflow runs.
+- Optional repository variables to enable T3 Connect in fork builds:
+  `CLERK_PUBLISHABLE_KEY`, `CLERK_JWT_TEMPLATE`, `CLERK_CLI_OAUTH_CLIENT_ID`,
+  `RELAY_URL`. Without them T3 Connect is off; SSH environments still work.
+- All upstream workflows are disabled on this fork (the sync job re-disables
+  any new ones), since they need upstream's runners and secrets.

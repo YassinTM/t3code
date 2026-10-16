@@ -1,4 +1,5 @@
-const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
+// Fork: runtimes come from this fork's releases (see FORK.md).
+const CLI_RELEASE_REPOSITORY = "YassinTM/t3code";
 export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
 export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";
 
