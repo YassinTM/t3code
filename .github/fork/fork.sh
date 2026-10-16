@@ -28,7 +28,7 @@ upstream_nightlies() {
 
 cmd_sync() {
   local run tag sha
-  read -r run tag sha < <(upstream_nightlies | head -n 1)
+  read -r run tag sha <<< "$(upstream_nightlies | sed -n 1p)"
   if [[ -z "${sha:-}" ]]; then
     echo "No upstream nightly tags found." >&2
     exit 1
@@ -62,7 +62,7 @@ cmd_version() {
       base_run="$run" base_tag="$tag" base_sha="$sha"
       break
     fi
-  done < <(upstream_nightlies)
+  done <<< "$(upstream_nightlies)"
   if [[ -z "$base_tag" ]]; then
     echo "HEAD contains no upstream nightly." >&2
     exit 1
