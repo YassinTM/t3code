@@ -42,8 +42,9 @@ Put new features in new files where possible and hook them in with small edits.
   with **Contents: read and write** and **Workflows: read and write**.
   `GITHUB_TOKEN` can't push merges that touch `.github/workflows`, and its
   pushes don't start other workflow runs.
-- Optional repository variables to enable T3 Connect in fork builds:
-  `CLERK_PUBLISHABLE_KEY`, `CLERK_JWT_TEMPLATE`, `CLERK_CLI_OAUTH_CLIENT_ID`,
-  `RELAY_URL`. Without them T3 Connect is off; SSH environments still work.
+- Repository variables `CLERK_PUBLISHABLE_KEY`, `CLERK_JWT_TEMPLATE`,
+  `CLERK_CLI_OAUTH_CLIENT_ID`, and `RELAY_URL` turn on T3 Connect. They hold
+  the public values every upstream build ships with (relay.t3.codes). Delete
+  them to build without T3 Connect.
 - All upstream workflows are disabled on this fork (the sync job re-disables
   any new ones), since they need upstream's runners and secrets.
