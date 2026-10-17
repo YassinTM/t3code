@@ -373,3 +373,32 @@ jobs:
               echo "Deleting $tag"
               gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
             done
+
+  # A failed build publishes nothing, so say so instead of failing quietly.
+  report_build:
+    name: Report build result
+    needs: [meta, build_bundle, desktop_linux_x64, desktop_linux_arm64, release]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TITLE: Fork release build failed
+      VERSION: ${{ needs.meta.outputs.version }}
+      FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+    steps:
+      - name: Open, update, or close the build-failure issue
+        run: |
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [[ "$FAILED" == "true" ]]; then
+            body="Building \`$VERSION\` from \`$GITHUB_SHA\` failed, so nothing was published. Apps stay on the last published version until a build succeeds. Run: $run_url"
+            if [[ -n "$existing" ]]; then
+              gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$body"
+            fi
+          elif [[ -n "$existing" ]]; then
+            gh issue close "$existing" --repo "$GITHUB_REPOSITORY" --comment "Fixed: \`$VERSION\` built and published. Run: $run_url"
+          fi
