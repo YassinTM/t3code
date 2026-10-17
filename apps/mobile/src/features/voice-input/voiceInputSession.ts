@@ -58,7 +58,8 @@ export class VoiceInputSession {
         dependencies.onStateChange(state);
       },
       readDraft: () => this.target?.readDraft() ?? null,
-      commitDraft: (text, selection) => this.target?.commitDraft(text, selection),
+      commitDraft: (text, selection, inserted) =>
+        this.target?.commitDraft(text, selection, inserted),
     });
   }
 

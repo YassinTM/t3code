@@ -39,6 +39,15 @@ Keep this list short; each one can conflict with upstream.
 
 Put new features in new files where possible and hook them in with small edits.
 
+## Fork features
+
+- **Dictation** (voice/dictation): upstream PR pingdotgg/t3code#19273, restructured so
+  its code lives in `*/dictation/*`, `contracts/src/dictation*.ts` and
+  `shared/src/spokenSkills.ts`, with one- or two-line hooks in `rpc.ts`, `ws.ts`,
+  `server.ts`, `settings.ts`, `RpcAuthorization.ts`, `RpcInstrumentation.ts`,
+  `clientRpcPermissions.ts` and a single block in `ChatComposer.tsx`. If upstream
+  merges dictation, drop the fork copy in favour of theirs.
+
 ## Setup (once)
 
 - Repository secret `FORK_SYNC_TOKEN`: a fine-grained PAT for this repo only,

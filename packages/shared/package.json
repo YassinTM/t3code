@@ -475,6 +475,10 @@
       "types": "./src/inlineSkills.ts",
       "import": "./src/inlineSkills.ts"
     },
+    "./spokenSkills": {
+      "types": "./src/spokenSkills.ts",
+      "import": "./src/spokenSkills.ts"
+    },
     "./mcpApp": {
       "types": "./src/mcpApp.ts",
       "import": "./src/mcpApp.ts"

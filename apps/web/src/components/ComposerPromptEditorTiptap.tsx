@@ -94,6 +94,7 @@ import {
   groupUndoByChangeKind,
   markAsClipboardEdit,
 } from "~/composer-undo-grouping";
+import { ComposerFlashPlugin, useFlashRange } from "~/dictation/composerFlash";
 import { collectInlineContextIds } from "~/lib/composerContextReferences";
 import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { cn, isMacPlatform } from "~/lib/utils";
@@ -133,6 +134,7 @@ export interface ComposerPromptEditorHandle {
     contextIds: string[];
   };
   isCaretOnVisualEdge: (edge: "start" | "end") => boolean;
+  flashRange: (range: { start: number; end: number }) => void;
 }
 
 export interface ComposerPromptEditorProps {
@@ -737,7 +739,7 @@ function decorationsForSelection(state: EditorState): DecorationSet {
 const ComposerMarkersExtension = Extension.create({
   name: "composer-rich-markers",
   addProseMirrorPlugins() {
-    return [ComposerMarkerPlugin];
+    return [ComposerMarkerPlugin, ComposerFlashPlugin];
   },
 });
 
@@ -1602,6 +1604,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     );
   };
 
+  const flashRange = useFlashRange(editor);
   useImperativeHandle(
     editorRef,
     () => ({
@@ -1623,6 +1626,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
         readSnapshot();
         return selectionRangeRef.current;
       },
+      flashRange,
       requestCitationComment: (request) => {
         citationRequestRef.current = request;
         if (!editor) return;
@@ -1678,7 +1682,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
           : edgeRect.bottom - caretRect.bottom < threshold;
       },
     }),
-    [editor, focusAt, literalText, readSnapshot],
+    [editor, flashRange, focusAt, literalText, readSnapshot],
   );
 
   const handleCopyCut = (event: React.ClipboardEvent, cut: boolean) => {

@@ -3,6 +3,7 @@ import { DeviceToolVersions } from "../device/DeviceToolVersions";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 import { ScopedSwitch } from "./ScopedSwitch";
 import { DeviceHostsSettings } from "./DeviceHostsSettings";
+import { DictationSettingsSection } from "./DictationSettings";
 import {
   AuthSettingsWriteScope,
   BrowserImportFailureReason,
@@ -1500,6 +1501,7 @@ export function IntegrationsSettingsPanel() {
         <PullRequestLinksOpenInAppSetting />
       </SettingsSection>
       <DeviceIntegrationSettings />
+      <DictationSettingsSection />
     </SettingsPageContainer>
   );
 }

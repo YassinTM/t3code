@@ -284,6 +284,8 @@ import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerImageThumbnail } from "./ComposerImageThumbnail";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
+import { ComposerDictationControl } from "./ComposerDictationControl";
+import { useComposerDictationWiring } from "../../dictation/useComposerDictationWiring";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
@@ -2312,7 +2314,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProviderEntry?.snapshot,
     selectedModel,
   );
+  const composerFocusState = useComposerFocusState();
+  const dictation = useComposerDictationWiring({
+    composerDraftTargetKey,
+    activeQuestionId: activePendingProgress?.activeQuestion?.id,
+    environmentId,
+    promptRef,
+    getEditor: () => composerEditorRef.current,
+    getComposerCursor: () => composerCursor,
+    getSkills: () => selectedProviderSkills,
+    applyPromptReplacement: (...args) => applyPromptReplacement(...args),
+    textUnavailable:
+      isConnecting ||
+      activePendingApproval !== null ||
+      projectSelectionRequired ||
+      activePendingProgress?.activeQuestion?.allowCustomAnswer === false ||
+      activePendingIsResponding,
+    isComposerFocused: composerFocusState.isComposerFocused,
+    keybindings,
+    terminalOpen,
+    isModelPickerOpen: () => isComposerModelPickerOpen,
+  });
   const sendDisabledReason =
+    (dictation.active ? "Finish dictation first." : null) ??
     externalSendDisabledReason ??
     (multipleModelSelections?.length === 0 ? "Select at least one model." : null) ??
     (activePendingProgress
@@ -2414,7 +2438,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isComposerScrollCollapsed,
     setIsComposerScrollCollapsed,
     restoreAfterTimelineReachedEnd,
-  } = useComposerFocusState();
+  } = composerFocusState;
   const [composerSubmissionError, setComposerSubmissionError] = useState<string | null>(null);
   const [providerInputSubmissionError, setProviderInputSubmissionError] = useState<string | null>(
     null,
@@ -7161,6 +7185,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                                   : "Ask anything, @tag files/folders, $use skills, or / for commands"
                     }
                     disabled={
+                      dictation.active ||
                       isConnecting ||
                       isComposerApprovalState ||
                       projectSelectionRequired ||
@@ -7280,6 +7305,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       </Tooltip>
                     </>
                   ) : null}
+                  <ComposerDictationControl {...dictation.controlProps} />
                   <ComposerFooterPrimaryActions
                     compact={isComposerResting || isComposerPrimaryActionsCompact}
                     canOperateThread={canOperateThread}

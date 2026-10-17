@@ -8,6 +8,10 @@ import { sourceControlClients } from "@t3tools/client-runtime/source-control-cli
 import { DEFAULT_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { commandLabel } from "./KeybindingsSettings.logic";
 import {
+  DICTATION_CONNECTIONS_SEARCH_ITEMS,
+  DICTATION_INTEGRATIONS_SEARCH_ITEMS,
+} from "./dictationSearchItems";
+import {
   validateSettingsScopeSearch,
   type ResolvedSettingsScope,
   type SettingsScopeSearch,
@@ -692,6 +696,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     targetId: "devices",
     searchTerms: ["xcode android studio sdk avd runtime"],
   },
+  ...DICTATION_INTEGRATIONS_SEARCH_ITEMS,
   {
     id: "browser-profiles",
     title: "Browser profiles",
@@ -975,6 +980,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/connections",
     searchTerms: ["pull request trusted environments shared credentials permissions read actions"],
   },
+  ...DICTATION_CONNECTIONS_SEARCH_ITEMS,
   {
     id: "archive",
     title: "Archived threads",

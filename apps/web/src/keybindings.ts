@@ -30,6 +30,9 @@ export interface ShortcutMatchContext {
   previewOpen: boolean;
   isWeb: boolean;
   isDesktop: boolean;
+  /** Lets one command default to different keys on macOS and other platforms.
+      Optional: filled from the platform unless a caller overrides it. */
+  isMac?: boolean;
   editableFocus?: boolean;
   [key: string]: boolean;
 }
@@ -60,6 +63,7 @@ function resolveContext(options: ShortcutMatchOptions | undefined): ShortcutMatc
     previewOpen: false,
     isWeb: !isElectron,
     isDesktop: isElectron,
+    isMac: isMacPlatform(resolvePlatform(options)),
     editableFocus: false,
     ...options?.context,
   };
