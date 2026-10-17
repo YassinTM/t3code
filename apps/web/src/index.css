@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./dictation/dictation.css";
 
 @custom-variant dark (&:is(.dark, .dark *));
 @custom-variant light (&:not(.dark, .dark *));

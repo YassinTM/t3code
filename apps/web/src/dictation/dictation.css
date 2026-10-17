@@ -1,0 +1,20 @@
+/* One-shot highlight on freshly inserted text (dictation); see ComposerFlashPlugin. */
+.composer-tiptap .composer-flash {
+  border-radius: 3px;
+  animation: composer-flash 900ms ease-out forwards;
+}
+
+@keyframes composer-flash {
+  from {
+    background-color: color-mix(in srgb, var(--primary) 28%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-tiptap .composer-flash {
+    animation: none;
+  }
+}
