@@ -1,9 +1,10 @@
 import { DICTATION_WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
+import { makeSpeechRpcHandlers } from "../speech/rpcHandlers.ts";
 import * as Dictation from "./Dictation.ts";
 
-/** Dictation RPC handlers, spread into the WebSocket handler map in `ws.ts`. */
+/** Dictation and speech RPC handlers, spread into the WebSocket handler map in `ws.ts`. */
 export const makeDictationRpcHandlers = Effect.gen(function* () {
   const dictation = yield* Dictation.Dictation;
   return {
@@ -20,5 +21,6 @@ export const makeDictationRpcHandlers = Effect.gen(function* () {
     [DICTATION_WS_METHODS.dictationCancel]: (input: Parameters<typeof dictation.cancel>[0]) =>
       dictation.cancel(input),
     [DICTATION_WS_METHODS.subscribeDictationState]: () => dictation.stateStream,
+    ...(yield* makeSpeechRpcHandlers),
   };
 });

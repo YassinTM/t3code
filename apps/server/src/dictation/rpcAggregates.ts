@@ -10,4 +10,9 @@ export const DICTATION_RPC_AGGREGATES = {
   [DICTATION_WS_METHODS.dictationFinish]: "dictation",
   [DICTATION_WS_METHODS.dictationCancel]: "dictation",
   [DICTATION_WS_METHODS.subscribeDictationState]: "dictation",
+  [DICTATION_WS_METHODS.speechInstall]: "speech",
+  [DICTATION_WS_METHODS.speechRemove]: "speech",
+  [DICTATION_WS_METHODS.speechWarm]: "speech",
+  [DICTATION_WS_METHODS.speechSynthesize]: "speech",
+  [DICTATION_WS_METHODS.subscribeSpeechState]: "speech",
 } as const;

@@ -10,7 +10,10 @@ import * as DictationRecognizer from "./DictationRecognizer.ts";
 
 const artifactsLayer = Layer.succeed(DictationArtifacts.DictationArtifacts, {
   supported: true,
+  root: "/dictation",
+  runtimeDirectory: "/dictation/runtime",
   paths: () => ({ runtime: "/dictation/runtime", model: "/dictation/models" }),
+  ensureRuntime: () => Effect.void,
   inspect: Effect.succeed({
     runtime: { _tag: "installed", sizeBytes: 1 } satisfies DictationInstallState,
     models: new Map<DictationModelId, DictationInstallState>(),
@@ -39,6 +42,9 @@ const ok: SpeechWorker.SpeechWorker["Service"] = {
   setConfig: () => Effect.void,
   decode: () => Effect.succeed(JSON.stringify({ text: "hello world", lang: "en" })),
   release: () => Effect.void,
+  ttsCreate: () => Effect.succeed(1),
+  ttsGenerate: () => Effect.succeed({ samples: new Float32Array([0.1]), sampleRate: 24_000 }),
+  ttsRelease: () => Effect.void,
 };
 
 it.effect("rebuilds the recognizer in the respawned worker and retries a decode once", () => {
@@ -62,6 +68,9 @@ it.effect("rebuilds the recognizer in the respawned worker and retries a decode 
       Effect.sync(() => {
         released.push(handleId);
       }),
+    ttsCreate: () => Effect.succeed(1),
+    ttsGenerate: () => Effect.succeed({ samples: new Float32Array([0.1]), sampleRate: 24_000 }),
+    ttsRelease: () => Effect.void,
   };
   return Effect.gen(function* () {
     const service = yield* DictationRecognizer.DictationRecognizer;

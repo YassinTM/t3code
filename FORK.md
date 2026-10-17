@@ -51,6 +51,11 @@ Put new features in new files where possible and hook them in with small edits.
   process (`t3 __speech-worker`, `apps/server/src/speech/`) instead of inside the
   server, so a model crash or OOM can't take the server down. Hooks: one branch in
   `apps/server/src/bin.ts`; dictation reaches it through `dictation/layer.ts`.
+- **Text to speech** (voice/tts): Kokoro (kokoro-en-v0_19, pinned sha256) in the
+  speech worker, `speech.*` RPCs and `speech*` server settings. All wiring rides
+  the dictation spreads (`dictationRpc.ts`, `dictation.ts`, `dictation/layer.ts`),
+  so no extra upstream hooks. Code in `apps/server/src/speech/` and
+  `packages/contracts/src/speech.ts`.
 
 ## Setup (once)
 

@@ -1,7 +1,8 @@
 /**
  * Test double for the speech worker protocol (see ../../../speech/worker/speechWorkerMain.ts)
  * with no native addon. `recognizer.create` takes a `config.mode` that decides how
- * `recognizer.decode` behaves, so every op is driven through the real client service.
+ * `recognizer.decode` behaves, and the same `mode` drives `tts.generate`, so every op is
+ * driven through the real client service.
  *
  * Args: [logFile?, signalFile?]. The fixture appends its pid on startup and the received
  * signal on SIGTERM, which lets tests observe respawns and shutdown.
@@ -62,6 +63,36 @@ process.on("message", (request) => {
           lang: config.lang ?? "en",
         }),
       });
+      return;
+    }
+    case "tts.create": {
+      const handleId = nextHandleId++;
+      handles.set(handleId, request.config);
+      reply({ id, ok: true, value: handleId });
+      return;
+    }
+    case "tts.generate": {
+      const config = handles.get(request.handleId) ?? {};
+      if (config.mode === "crash") process.exit(7);
+      if (config.mode === "hang") return;
+      if (config.mode === "fail") {
+        reply({ id, ok: false, error: { message: "fixture synthesis failed" } });
+        return;
+      }
+      // Echo the request so the client sees exactly what crossed the channel.
+      reply({
+        id,
+        ok: true,
+        value: {
+          samples: new Float32Array([request.sid, request.speed, request.text.length]),
+          sampleRate: 24_000,
+        },
+      });
+      return;
+    }
+    case "tts.release": {
+      handles.delete(request.handleId);
+      reply({ id, ok: true, value: undefined });
       return;
     }
     default: {

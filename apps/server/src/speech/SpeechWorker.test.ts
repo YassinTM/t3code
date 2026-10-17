@@ -59,6 +59,31 @@ it.live("round-trips audio and handles over the worker channel", () => {
   }).pipe(Effect.provide(testLayer(fixture)), Effect.scoped, Effect.ensuring(cleanup(fixture)));
 });
 
+it.live("round-trips a synthesized buffer and its handle", () => {
+  const fixture = makeFixture();
+  return Effect.gen(function* () {
+    const worker = yield* SpeechWorker.SpeechWorker;
+    const handle = yield* worker.ttsCreate("runtime", { mode: "ok" });
+    const generated = yield* worker.ttsGenerate({
+      handleId: handle,
+      text: "hello",
+      sid: 3,
+      speed: 1.5,
+    });
+    assert.ok(generated.samples instanceof Float32Array);
+    assert.deepStrictEqual([...generated.samples], [3, 1.5, 5]);
+    assert.strictEqual(generated.sampleRate, 24_000);
+    yield* worker.ttsRelease(handle);
+    const failing = yield* worker.ttsCreate("runtime", { mode: "fail" });
+    const error = yield* worker
+      .ttsGenerate({ handleId: failing, text: "hello", sid: 0, speed: 1 })
+      .pipe(Effect.flip);
+    assert.strictEqual(error._tag, "SpeechWorkerError");
+    assert.match(error.message, /fixture synthesis failed/);
+    assert.strictEqual(fixture.spawns().length, 1);
+  }).pipe(Effect.provide(testLayer(fixture)), Effect.scoped, Effect.ensuring(cleanup(fixture)));
+});
+
 it.live("fails an in-flight request when the worker crashes and respawns on demand", () => {
   const fixture = makeFixture();
   return Effect.gen(function* () {
