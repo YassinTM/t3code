@@ -245,6 +245,15 @@ jobs:
       - name: Install browser secret helper build libraries
         run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
+      # Upstream merges land here unreviewed; fail before publishing if fork code no longer fits.
+      - name: Check fork changes against upstream
+        timeout-minutes: 25
+        run: |
+          vp run --filter t3 --filter @t3tools/web --filter @t3tools/contracts --filter @t3tools/shared --filter @t3tools/client-runtime typecheck
+          (cd apps/server && vp test run --passWithNoTests src/dictation src/speech)
+          (cd apps/web && vp test run --passWithNoTests --project unit src/dictation src/voice src/state/npmRelease.test.ts)
+          (cd packages/shared && vp test run --config ../../vite.config.ts --dir . src/cliRelease.test.ts src/spokenSkills.test.ts)
+
       - name: Build JS bundle
         run: vp run build:desktop
 
