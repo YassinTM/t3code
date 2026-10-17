@@ -47,6 +47,10 @@ Put new features in new files where possible and hook them in with small edits.
   `server.ts`, `settings.ts`, `RpcAuthorization.ts`, `RpcInstrumentation.ts`,
   `clientRpcPermissions.ts` and a single block in `ChatComposer.tsx`. If upstream
   merges dictation, drop the fork copy in favour of theirs.
+- **Speech worker** (voice/speech-worker): native speech models run in a child
+  process (`t3 __speech-worker`, `apps/server/src/speech/`) instead of inside the
+  server, so a model crash or OOM can't take the server down. Hooks: one branch in
+  `apps/server/src/bin.ts`; dictation reaches it through `dictation/layer.ts`.
 
 ## Setup (once)
 
