@@ -11,6 +11,11 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { EnvironmentId, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { SpeechSettingsFields } from "./speech.ts";
+
+// Speech synthesis shares dictation's runtime, worker and settings spread, so its contracts
+// reach `@t3tools/contracts` through this module instead of another `index.ts` line.
+export * from "./speech.ts";
 
 /** Sample rate every client sends. The server never resamples or decodes containers. */
 export const DICTATION_SAMPLE_RATE = 16_000;
@@ -55,9 +60,11 @@ export const DictationSettingsFields = {
     dictation: DictationSettings.pipe(
       Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(DictationSettings)({}))),
     ),
+    ...SpeechSettingsFields.server,
   },
   serverPatch: {
     dictation: Schema.optionalKey(DictationSettingsPatch),
+    ...SpeechSettingsFields.serverPatch,
   },
   client: {
     /** Environment that transcribes this device's dictation; null picks one automatically. */

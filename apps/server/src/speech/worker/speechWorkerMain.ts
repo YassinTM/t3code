@@ -7,6 +7,11 @@ import * as NodeFS from "node:fs";
 import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
 
+interface OfflineTtsResult {
+  readonly samples: Float32Array;
+  readonly sampleRate: number;
+}
+
 interface NativeAddon {
   createOfflineRecognizerAsync(config: unknown): Promise<unknown>;
   offlineRecognizerSetConfig(handle: unknown, config: unknown): void;
@@ -17,6 +22,8 @@ interface NativeAddon {
   ): void;
   decodeOfflineStreamAsync(handle: unknown, stream: unknown): Promise<unknown>;
   getOfflineStreamResultAsJson(stream: unknown): string;
+  createOfflineTtsAsync(config: unknown): Promise<unknown>;
+  offlineTtsGenerateAsync(handle: unknown, config: unknown): Promise<OfflineTtsResult>;
 }
 
 type SpeechWorkerRequest =
@@ -29,9 +36,27 @@ type SpeechWorkerRequest =
       samples: Float32Array;
       sampleRate: number;
     }
-  | { readonly id: number; readonly op: "recognizer.release"; handleId: number };
+  | { readonly id: number; readonly op: "recognizer.release"; handleId: number }
+  | { readonly id: number; readonly op: "tts.create"; runtimeDir: string; config: unknown }
+  | {
+      readonly id: number;
+      readonly op: "tts.generate";
+      handleId: number;
+      text: string;
+      sid: number;
+      speed: number;
+    }
+  | { readonly id: number; readonly op: "tts.release"; handleId: number };
 
-/** Free native model memory shortly after the last recognizer goes away. */
+type HandleKind = "recognizer" | "tts";
+
+interface Handle {
+  readonly kind: HandleKind;
+  readonly addon: NativeAddon;
+  readonly handle: unknown;
+}
+
+/** Free native model memory shortly after the last recognizer or TTS handle goes away. */
 const IDLE_EXIT_MS = 60_000;
 
 export async function runSpeechWorker(): Promise<void> {
@@ -42,7 +67,7 @@ export async function runSpeechWorker(): Promise<void> {
     // Non-Linux hosts and locked-down containers have no such knob.
   }
   const addons = new Map<string, NativeAddon>();
-  const handles = new Map<number, { readonly addon: NativeAddon; readonly handle: unknown }>();
+  const handles = new Map<number, Handle>();
   let nextHandleId = 1;
   let idleTimer: NodeJS.Timeout | null = null;
 
@@ -83,35 +108,53 @@ export async function runSpeechWorker(): Promise<void> {
     addons.set(runtimeDir, addon);
     return addon;
   };
-  const recognizerFor = (handleId: number) => {
+  const handleFor = (handleId: number, kind: HandleKind) => {
     const entry = handles.get(handleId);
-    if (!entry) throw new Error("The dictation recognizer is no longer loaded.");
+    if (!entry || entry.kind !== kind)
+      throw new Error(
+        kind === "tts"
+          ? "The speech model is no longer loaded."
+          : "The dictation recognizer is no longer loaded.",
+      );
     return entry;
+  };
+
+  const createHandle = async (
+    runtimeDir: string,
+    kind: HandleKind,
+    create: (addon: NativeAddon) => Promise<unknown>,
+  ) => {
+    // Before the slow load: the idle timer must not exit the process mid-create.
+    cancelIdleExit();
+    const addon = addonFor(runtimeDir);
+    const handle = await create(addon).catch((error) => {
+      if (handles.size === 0) scheduleIdleExit();
+      throw error;
+    });
+    const handleId = nextHandleId++;
+    handles.set(handleId, { kind, addon, handle });
+    return handleId;
   };
 
   const handle = async (request: SpeechWorkerRequest): Promise<void> => {
     switch (request.op) {
       case "recognizer.create": {
-        // Before the slow load: the idle timer must not exit the process mid-create.
-        cancelIdleExit();
-        const addon = addonFor(request.runtimeDir);
-        const handle = await addon.createOfflineRecognizerAsync(request.config).catch((error) => {
-          if (handles.size === 0) scheduleIdleExit();
-          throw error;
-        });
-        const handleId = nextHandleId++;
-        handles.set(handleId, { addon, handle });
-        succeed(request.id, handleId);
+        succeed(
+          request.id,
+          await createHandle(request.runtimeDir, "recognizer", (addon) =>
+            addon.createOfflineRecognizerAsync(request.config),
+          ),
+        );
         return;
       }
       case "recognizer.setConfig": {
-        const entry = recognizerFor(request.handleId);
+        const entry = handleFor(request.handleId, "recognizer");
         entry.addon.offlineRecognizerSetConfig(entry.handle, request.config);
         succeed(request.id, undefined);
         return;
       }
       case "recognizer.decode": {
-        const entry = recognizerFor(request.handleId);
+        const entry = handleFor(request.handleId, "recognizer");
         const stream = entry.addon.createOfflineStream(entry.handle);
         entry.addon.acceptWaveformOffline(stream, {
           samples: request.samples,
@@ -122,6 +165,33 @@ export async function runSpeechWorker(): Promise<void> {
         return;
       }
       case "recognizer.release": {
+        handles.delete(request.handleId);
+        if (handles.size === 0) scheduleIdleExit();
+        succeed(request.id, undefined);
+        return;
+      }
+      case "tts.create": {
+        succeed(
+          request.id,
+          await createHandle(request.runtimeDir, "tts", (addon) =>
+            addon.createOfflineTtsAsync(request.config),
+          ),
+        );
+        return;
+      }
+      case "tts.generate": {
+        const entry = handleFor(request.handleId, "tts");
+        const result = await entry.addon.offlineTtsGenerateAsync(entry.handle, {
+          text: request.text,
+          sid: request.sid,
+          speed: request.speed,
+          // The addon copies into a Float32Array we can send over IPC as-is.
+          enableExternalBuffer: false,
+        });
+        succeed(request.id, { samples: result.samples, sampleRate: result.sampleRate });
+        return;
+      }
+      case "tts.release": {
         handles.delete(request.handleId);
         if (handles.size === 0) scheduleIdleExit();
         succeed(request.id, undefined);

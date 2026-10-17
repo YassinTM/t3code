@@ -41,16 +41,33 @@ export class SpeechWorker extends Context.Service<
       sampleRate: number,
     ) => Effect.Effect<string, SpeechWorkerFailure>;
     readonly release: (handleId: number) => Effect.Effect<void, SpeechWorkerFailure>;
+    readonly ttsCreate: (
+      runtimeDir: string,
+      config: unknown,
+    ) => Effect.Effect<number, SpeechWorkerFailure>;
+    readonly ttsGenerate: (input: {
+      readonly handleId: number;
+      readonly text: string;
+      readonly sid: number;
+      readonly speed: number;
+    }) => Effect.Effect<{ samples: Float32Array; sampleRate: number }, SpeechWorkerFailure>;
+    readonly ttsRelease: (handleId: number) => Effect.Effect<void, SpeechWorkerFailure>;
   }
 >()("t3/speech/SpeechWorker") {}
 
 interface Timeouts {
   readonly create: number;
   readonly decode: number;
+  readonly ttsGenerate: number;
   readonly other: number;
 }
 
-const defaultTimeouts: Timeouts = { create: 120_000, decode: 30_000, other: 10_000 };
+const defaultTimeouts: Timeouts = {
+  create: 120_000,
+  decode: 30_000,
+  ttsGenerate: 60_000,
+  other: 10_000,
+};
 const crashWindowMs = 5 * 60_000;
 const crashLimit = 3;
 
@@ -289,6 +306,10 @@ const make = (options: SpeechWorkerOptions) =>
       decode: (handleId, samples, sampleRate) =>
         request("recognizer.decode", { handleId, samples, sampleRate }, timeouts.decode),
       release: (handleId) => request("recognizer.release", { handleId }, timeouts.other),
+      ttsCreate: (runtimeDir, config) =>
+        request("tts.create", { runtimeDir, config }, timeouts.create),
+      ttsGenerate: (input) => request("tts.generate", { ...input }, timeouts.ttsGenerate),
+      ttsRelease: (handleId) => request("tts.release", { handleId }, timeouts.other),
     });
   });
 

@@ -55,7 +55,10 @@ const testLayer = (
           });
         return {
           supported: options.supported ?? true,
+          root: "/unused",
+          runtimeDirectory: "/unused",
           paths: () => ({ runtime: "/unused", model: "/unused" }),
+          ensureRuntime: (progress) => progress({ _tag: "installed", sizeBytes: 1 }),
           inspect: options.inspectFails
             ? Effect.fail(
                 new DictationError({ reason: "install-failed", message: "Unreadable state." }),

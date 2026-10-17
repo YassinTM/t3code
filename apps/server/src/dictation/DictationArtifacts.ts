@@ -10,7 +10,6 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
-import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -18,13 +17,17 @@ import * as Layer from "effect/Layer";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ServerConfig from "../config.ts";
 import { models, runtimeFor } from "./models.ts";
-import { createIntegrityHash } from "./integrity.ts";
+import { downloadArtifact } from "./artifactDownload.ts";
 import { readTar } from "./tar.ts";
 
 export class DictationArtifacts extends Context.Service<
   DictationArtifacts,
   {
     readonly supported: boolean;
+    /** `<stateDir>/dictation`: the base every local speech artifact lives under. */
+    readonly root: string;
+    /** The shared sherpa-onnx native runtime, or null when this platform has no build. */
+    readonly runtimeDirectory: string | null;
     readonly paths: (model: DictationModelId) => { runtime: string; model: string };
     readonly inspect: Effect.Effect<
       {
@@ -33,6 +36,10 @@ export class DictationArtifacts extends Context.Service<
       },
       DictationError
     >;
+    /** Installs the native runtime when it is missing; a no-op once it is complete. */
+    readonly ensureRuntime: (
+      progress: (state: DictationInstallState) => Effect.Effect<void>,
+    ) => Effect.Effect<void, DictationError>;
     readonly install: (
       model: DictationModelId,
       progress: (
@@ -52,8 +59,9 @@ const make = Effect.gen(function* () {
   const mutations = yield* Semaphore.make(1);
   const root = path.join(config.stateDir, "dictation");
   const runtime = runtimeFor(yield* HostProcess.Platform, yield* HostProcess.Architecture);
+  const runtimeDirectory = runtime === null ? null : path.join(root, "runtime", runtime.directory);
   const paths = (model: DictationModelId) => ({
-    runtime: path.join(root, "runtime", runtime?.directory ?? "unsupported"),
+    runtime: runtimeDirectory ?? path.join(root, "runtime", "unsupported"),
     model: path.join(root, "models", model),
   });
   const io = <A, E, R>(operation: Effect.Effect<A, E, R>) =>
@@ -67,6 +75,32 @@ const make = Effect.gen(function* () {
           }),
       ),
     );
+  const failed = (message: string, cause?: unknown) =>
+    new DictationError({
+      reason: "install-failed",
+      message,
+      ...(cause === undefined ? {} : { cause }),
+    });
+  const download = (
+    url: string,
+    destination: string,
+    algorithm: "sha256" | "sha512",
+    expected: string,
+    maxBytes: number,
+    progress: (received: number, total: number) => Effect.Effect<void>,
+  ) =>
+    downloadArtifact({
+      http,
+      fs,
+      failed,
+      noun: "dictation",
+      url,
+      destination,
+      algorithm,
+      expected,
+      maxBytes,
+      progress,
+    });
   const size = (file: string) =>
     fs.stat(file).pipe(
       Effect.map((info) => (info.type === "File" ? Number(info.size) : null)),
@@ -107,75 +141,6 @@ const make = Effect.gen(function* () {
   });
 
   // Downloads stream to temporary files. The AbortSignal and finalizer own partial-file cleanup.
-  const download = Effect.fnUntraced(function* (
-    url: string,
-    destination: string,
-    algorithm: "sha256" | "sha512",
-    expected: string,
-    maxBytes: number,
-    progress: (received: number, total: number) => Effect.Effect<void>,
-  ) {
-    const response = yield* http.get(url).pipe(
-      Effect.mapError(
-        (cause) =>
-          new DictationError({
-            reason: "install-failed",
-            message: "Could not download dictation files.",
-            cause,
-          }),
-      ),
-      Effect.timeoutOrElse({
-        duration: "30 seconds",
-        orElse: () =>
-          Effect.fail(
-            new DictationError({
-              reason: "install-failed",
-              message: "The dictation download timed out.",
-            }),
-          ),
-      }),
-    );
-    if (response.status !== 200)
-      return yield* new DictationError({
-        reason: "install-failed",
-        message: "The dictation download was unavailable.",
-      });
-    const total = Number(response.headers["content-length"]) || maxBytes;
-    const file = yield* io(fs.open(destination, { flag: "wx" }));
-    const hash = createIntegrityHash(algorithm);
-    let received = 0;
-    yield* response.stream.pipe(
-      Stream.timeout("30 seconds"),
-      Stream.mapError(
-        (cause) =>
-          new DictationError({
-            reason: "install-failed",
-            message: "The dictation download was interrupted.",
-            cause,
-          }),
-      ),
-      Stream.runForEach((bytes) =>
-        Effect.gen(function* () {
-          received += bytes.length;
-          if (received > maxBytes)
-            return yield* new DictationError({
-              reason: "install-failed",
-              message: "The dictation download exceeded its expected size.",
-            });
-          hash.update(bytes);
-          yield* io(file.writeAll(bytes));
-          yield* progress(received, total);
-        }),
-      ),
-    );
-    if (hash.digest(algorithm === "sha512" ? "base64" : "hex") !== expected)
-      return yield* new DictationError({
-        reason: "install-failed",
-        message: "The dictation download failed integrity verification.",
-      });
-    return received;
-  }, Effect.scoped);
-
   const atomicInstall = Effect.fnUntraced(function* (
     destination: string,
     write: (temporary: string) => Effect.Effect<void, DictationError, Scope.Scope>,
@@ -192,13 +157,98 @@ const make = Effect.gen(function* () {
     yield* io(fs.rename(temporary, destination));
   });
 
+  /**
+   * Installs the shared native runtime when it is incomplete, so both dictation and
+   * speech can rely on one copy. `progress` receives the same states `install` reports.
+   */
+  const installRuntime = Effect.fnUntraced(function* (
+    progress: (state: DictationInstallState) => Effect.Effect<void>,
+  ) {
+    if (!runtime)
+      return yield* new DictationError({
+        reason: "unsupported-platform",
+        message: "Local dictation is unavailable on this platform.",
+      });
+    const current = yield* inspect;
+    if (current.runtime._tag === "installed") {
+      yield* progress(current.runtime);
+      return;
+    }
+    let lastProgress = -Infinity;
+    const report = (state: DictationInstallState) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis;
+        if (now - lastProgress >= 250) {
+          yield* progress(state);
+          lastProgress = now;
+        }
+      });
+    yield* progress({ _tag: "installing", receivedBytes: 0, totalBytes: 0 });
+    yield* atomicInstall(path.join(root, "runtime", runtime.directory), (temporary) =>
+      Effect.gen(function* () {
+        const archive = path.join(temporary, "runtime.tgz");
+        yield* download(
+          runtime.url,
+          archive,
+          "sha512",
+          runtime.integrity,
+          128 * 1024 * 1024,
+          (receivedBytes, totalBytes) => report({ _tag: "installing", receivedBytes, totalBytes }),
+        );
+        const compressed = yield* io(fs.readFile(archive));
+        const expanded = yield* Effect.tryPromise({
+          try: () =>
+            NodeUtil.promisify(NodeZlib.gunzip)(compressed, {
+              maxOutputLength: 512 * 1024 * 1024,
+            }),
+          catch: (cause) =>
+            new DictationError({
+              reason: "install-failed",
+              message: "The dictation runtime archive was invalid.",
+              cause,
+            }),
+        });
+        const files = yield* Effect.try({
+          try: () => readTar(expanded),
+          catch: (cause) =>
+            new DictationError({
+              reason: "install-failed",
+              message: "The dictation runtime archive was invalid.",
+              cause,
+            }),
+        });
+        if (
+          !runtime.nativeFiles.every((name) =>
+            files.some((file) => file.path === name && file.bytes.length > 0),
+          )
+        )
+          return yield* new DictationError({
+            reason: "install-failed",
+            message: "The dictation runtime addon was missing.",
+          });
+        for (const file of files) {
+          const target = path.join(temporary, file.path);
+          yield* io(fs.makeDirectory(path.dirname(target), { recursive: true }));
+          yield* io(fs.writeFile(target, file.bytes));
+        }
+        yield* io(fs.remove(archive));
+      }),
+    );
+    yield* progress((yield* inspect).runtime);
+  }, Effect.scoped);
+
+  const ensureRuntime: DictationArtifacts["Service"]["ensureRuntime"] = (progress) =>
+    mutations.withPermit(installRuntime(progress));
+
   const install: DictationArtifacts["Service"]["install"] = Effect.fnUntraced(
     function* (model, progress) {
-      if (!runtime)
-        return yield* new DictationError({
-          reason: "unsupported-platform",
-          message: "Local dictation is unavailable on this platform.",
-        });
+      yield* installRuntime((state) => progress("runtime", state));
+      const current = yield* inspect;
+      const existingModel = current.models.get(model);
+      if (existingModel?._tag === "installed") {
+        yield* progress(model, existingModel);
+        return;
+      }
       let lastProgress = -Infinity;
       const report: typeof progress = (artifact, state) =>
         Effect.gen(function* () {
@@ -208,67 +258,6 @@ const make = Effect.gen(function* () {
             lastProgress = now;
           }
         });
-      const current = yield* inspect;
-      if (current.runtime._tag !== "installed") {
-        yield* progress("runtime", { _tag: "installing", receivedBytes: 0, totalBytes: 0 });
-        yield* atomicInstall(paths(model).runtime, (temporary) =>
-          Effect.gen(function* () {
-            const archive = path.join(temporary, "runtime.tgz");
-            yield* download(
-              runtime.url,
-              archive,
-              "sha512",
-              runtime.integrity,
-              128 * 1024 * 1024,
-              (receivedBytes, totalBytes) =>
-                report("runtime", { _tag: "installing", receivedBytes, totalBytes }),
-            );
-            const compressed = yield* io(fs.readFile(archive));
-            const expanded = yield* Effect.tryPromise({
-              try: () =>
-                NodeUtil.promisify(NodeZlib.gunzip)(compressed, {
-                  maxOutputLength: 512 * 1024 * 1024,
-                }),
-              catch: (cause) =>
-                new DictationError({
-                  reason: "install-failed",
-                  message: "The dictation runtime archive was invalid.",
-                  cause,
-                }),
-            });
-            const files = yield* Effect.try({
-              try: () => readTar(expanded),
-              catch: (cause) =>
-                new DictationError({
-                  reason: "install-failed",
-                  message: "The dictation runtime archive was invalid.",
-                  cause,
-                }),
-            });
-            if (
-              !runtime.nativeFiles.every((name) =>
-                files.some((file) => file.path === name && file.bytes.length > 0),
-              )
-            )
-              return yield* new DictationError({
-                reason: "install-failed",
-                message: "The dictation runtime addon was missing.",
-              });
-            for (const file of files) {
-              const target = path.join(temporary, file.path);
-              yield* io(fs.makeDirectory(path.dirname(target), { recursive: true }));
-              yield* io(fs.writeFile(target, file.bytes));
-            }
-            yield* io(fs.remove(archive));
-          }),
-        );
-        yield* progress("runtime", (yield* inspect).runtime);
-      } else yield* progress("runtime", current.runtime);
-      const existingModel = current.models.get(model);
-      if (existingModel?._tag === "installed") {
-        yield* progress(model, existingModel);
-        return;
-      }
       const totalBytes = models[model].files.reduce((total, file) => total + file.bytes, 0);
       yield* progress(model, { _tag: "installing", receivedBytes: 0, totalBytes });
       yield* atomicInstall(paths(model).model, (temporary) =>
@@ -301,7 +290,16 @@ const make = Effect.gen(function* () {
     yield* io(fs.remove(destination, { recursive: true, force: true }));
     yield* io(fs.remove(`${destination}.tmp`, { recursive: true, force: true }));
   });
-  return DictationArtifacts.of({ supported: runtime !== null, paths, inspect, install, remove });
+  return DictationArtifacts.of({
+    supported: runtime !== null,
+    root,
+    runtimeDirectory,
+    paths,
+    inspect,
+    ensureRuntime,
+    install,
+    remove,
+  });
 });
 
 export const layer = Layer.effect(DictationArtifacts, make);
