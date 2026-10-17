@@ -13,6 +13,7 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as ServerConfig from "../config.ts";
+import * as SpeechWorker from "../speech/SpeechWorker.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Dictation from "./Dictation.ts";
 import * as DictationArtifacts from "./DictationArtifacts.ts";
@@ -57,7 +58,12 @@ it.live.skipIf(!fixture)(
         Layer.provide(Layer.succeed(HttpClient.HttpClient, http)),
       );
       const layer = Dictation.layer.pipe(
-        Layer.provide(DictationRecognizer.layer.pipe(Layer.provide(artifactsLayer))),
+        Layer.provide(
+          DictationRecognizer.layer.pipe(
+            Layer.provide(artifactsLayer),
+            Layer.provide(SpeechWorker.layer),
+          ),
+        ),
         Layer.provideMerge(artifactsLayer),
         Layer.provideMerge(
           ServerSettings.layerTest({ dictation: { engine: "local", localModel: model } }),
@@ -161,7 +167,7 @@ it.live.skipIf(!fixture)(
             {
               model,
               availableParallelism: NodeOS.availableParallelism(),
-              numThreads: Math.min(8, Math.max(1, NodeOS.availableParallelism())),
+              numThreads: Math.min(4, Math.max(1, NodeOS.availableParallelism())),
               runs,
               rssMB: Math.round(process.memoryUsage().rss / 1e6),
             },

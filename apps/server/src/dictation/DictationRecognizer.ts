@@ -1,4 +1,3 @@
-import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as Path from "effect/Path";
 import {
@@ -11,6 +10,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as SpeechWorker from "../speech/SpeechWorker.ts";
 import { isQuiet } from "./audio.ts";
 import { models, resolveLanguage } from "./models.ts";
 import * as DictationArtifacts from "./DictationArtifacts.ts";
@@ -22,18 +22,6 @@ interface OfflineConfig {
     provider: "cpu";
     debug: number;
   };
-}
-
-interface NativeAddon {
-  createOfflineRecognizerAsync(config: OfflineConfig): Promise<unknown>;
-  offlineRecognizerSetConfig(handle: unknown, config: OfflineConfig): void;
-  createOfflineStream(handle: unknown): unknown;
-  acceptWaveformOffline(
-    stream: unknown,
-    waveform: { samples: Float32Array; sampleRate: number },
-  ): void;
-  decodeOfflineStreamAsync(handle: unknown, stream: unknown): Promise<unknown>;
-  getOfflineStreamResultAsJson(stream: unknown): string;
 }
 
 const Result = Schema.fromJsonString(
@@ -64,63 +52,67 @@ export class DictationRecognizer extends Context.Service<
 const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const artifacts = yield* DictationArtifacts.DictationArtifacts;
+  const worker = yield* SpeechWorker.SpeechWorker;
   const load = Effect.fnUntraced(function* (model: DictationModelId, language: string) {
     const locations = artifacts.paths(model);
-    const addon = yield* Effect.try({
-      // The pinned addon is the native boundary, with only the methods used here typed locally.
-      try: () =>
-        NodeModule.createRequire(import.meta.url)(
-          path.join(locations.runtime, "sherpa-onnx.node"),
-        ) as NativeAddon,
-      catch: (cause) =>
-        new DictationError({
-          reason: "load-failed",
-          message: "Could not load the dictation runtime.",
-          cause,
-        }),
-    });
-    let currentLanguage = resolveLanguage(model, language);
     const configFor = (language: string): OfflineConfig => ({
       featConfig: { sampleRate: DICTATION_SAMPLE_RATE, featureDim: models[model].featureDim },
       modelConfig: {
         ...models[model].modelConfig((name) => path.join(locations.model, name), language),
-        numThreads: Math.min(8, Math.max(1, NodeOS.availableParallelism())),
+        // Leave CPU for the agents sharing the host; dictation is background work.
+        numThreads: Math.min(4, Math.max(1, NodeOS.availableParallelism())),
         provider: "cpu",
         debug: 0,
       },
     });
-    let handle: unknown = yield* Effect.tryPromise({
-      try: () => addon.createOfflineRecognizerAsync(configFor(currentLanguage)),
-      catch: (cause) =>
-        new DictationError({
-          reason: "load-failed",
-          message: "Could not load the dictation model.",
-          cause,
+    // The native recognizer lives in the speech worker and dies with it, so a handle is only
+    // valid until the next `SpeechWorkerGone`.
+    const open = (language: string) => worker.create(locations.runtime, configFor(language));
+    let currentLanguage = resolveLanguage(model, language);
+    let handleId = yield* open(currentLanguage).pipe(
+      Effect.mapError(
+        (cause) =>
+          new DictationError({
+            reason: "load-failed",
+            message: "Could not load the dictation model.",
+            cause,
+          }),
+      ),
+    );
+    const transcribe = (samples: Float32Array, pinnedLanguage: string) =>
+      Effect.gen(function* () {
+        if (pinnedLanguage !== currentLanguage) {
+          yield* worker.setConfig(handleId, configFor(pinnedLanguage));
+          currentLanguage = pinnedLanguage;
+        }
+        return yield* worker.decode(handleId, samples, DICTATION_SAMPLE_RATE);
+      }).pipe(
+        Effect.catchTags({
+          // The worker crashed and took the recognizer with it. The next request respawns it,
+          // so rebuild the recognizer once and retry this decode once.
+          SpeechWorkerGone: () =>
+            Effect.gen(function* () {
+              currentLanguage = pinnedLanguage;
+              handleId = yield* open(pinnedLanguage);
+              return yield* worker.decode(handleId, samples, DICTATION_SAMPLE_RATE);
+            }),
         }),
-    });
+      );
     const decode = (samples: Float32Array, language: string) =>
       Effect.gen(function* () {
         const pinnedLanguage = resolveLanguage(model, language);
         if (models[model].skipSilence && isQuiet(samples))
           return { text: "", locale: pinnedLanguage || "en" };
-        const json = yield* Effect.tryPromise({
-          try: async () => {
-            if (pinnedLanguage !== currentLanguage) {
-              addon.offlineRecognizerSetConfig(handle, configFor(pinnedLanguage));
-              currentLanguage = pinnedLanguage;
-            }
-            const stream = addon.createOfflineStream(handle);
-            addon.acceptWaveformOffline(stream, { samples, sampleRate: DICTATION_SAMPLE_RATE });
-            await addon.decodeOfflineStreamAsync(handle, stream);
-            return addon.getOfflineStreamResultAsJson(stream);
-          },
-          catch: (cause) =>
-            new DictationError({
-              reason: "transcription-failed",
-              message: "Could not transcribe the recording.",
-              cause,
-            }),
-        });
+        const json = yield* transcribe(samples, pinnedLanguage).pipe(
+          Effect.mapError(
+            (cause) =>
+              new DictationError({
+                reason: "transcription-failed",
+                message: "Could not transcribe the recording.",
+                cause,
+              }),
+          ),
+        );
         const result = yield* decodeResult(json).pipe(
           // Schema failures can contain transcript fragments, so keep this domain validation error private.
           Effect.mapError(
@@ -138,9 +130,7 @@ const make = Effect.gen(function* () {
       });
     return {
       decode,
-      release: Effect.sync(() => {
-        handle = null;
-      }),
+      release: Effect.suspend(() => worker.release(handleId).pipe(Effect.ignore)),
     } satisfies Recognizer;
   });
   return DictationRecognizer.of({ load });
