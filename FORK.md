@@ -33,6 +33,9 @@ Keep this list short; each one can conflict with upstream.
 - `packages/shared/src/cliRelease.ts`: `CLI_RELEASE_REPOSITORY` points at this
   fork, so `t3 update` and SSH environments install fork runtimes (tests in
   `cliRelease.test.ts` and `packages/ssh/src/tunnel.test.ts` updated to match).
+- `apps/web/src/state/npmRelease.ts`: "Update everything" checks that the
+  version is released on this fork instead of on npm, which never has fork
+  versions.
 
 Put new features in new files where possible and hook them in with small edits.
 
