@@ -5,8 +5,12 @@ import {
   type DictationState,
   type EnvironmentId,
   resolveEnvironmentMachineKind,
+  SPEECH_MAX_SPEED,
+  SPEECH_MIN_SPEED,
+  SPEECH_VOICES,
+  type SpeechState,
 } from "@t3tools/contracts";
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 
 import {
   useClientSettings,
@@ -23,6 +27,7 @@ import {
 import type { EnvironmentPresentation } from "~/state/environments";
 import { useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { speechEnvironment, SPEECH_MODEL_BYTES, useSpeechState } from "~/voice/speechState";
 import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { toastManager } from "../ui/toast";
@@ -82,6 +87,16 @@ function readinessLabel(state: DictationState | null): string {
 const modelDetail = (model: DictationModel) =>
   [model.languages, formatBytes(model.downloadBytes), model.note].filter(Boolean).join(" · ");
 
+/** The Integrations page's dictation area: transcription first, then read aloud. */
+export function DictationSettingsSection() {
+  return (
+    <>
+      <DictationSettingsRows />
+      <ReadAloudSettingsSection />
+    </>
+  );
+}
+
 /**
  * Dictation for the environments selected in the settings header. Choosing a
  * model while dictation is on is what downloads it; the status line follows
@@ -89,7 +104,7 @@ const modelDetail = (model: DictationModel) =>
  * only detect automatically) so switching models never shifts the layout. Changing settings needs settings:write; retrying a download
  * and removing an inactive model need orchestration:operate.
  */
-export function DictationSettingsSection() {
+function DictationSettingsRows() {
   const { scope, environment, connectedEnvironments } = useSettingsScope();
   const environmentId =
     environment?.connection.phase === "connected" && environment.serverConfig !== null
@@ -423,4 +438,235 @@ export function DictationRoutingSettings({
 function DictationReadiness(props: { readonly environmentId: EnvironmentId }) {
   const { state } = useDictationState(props.environmentId);
   return <span className="text-xs text-muted-foreground">{readinessLabel(state)}</span>;
+}
+
+/** The Kokoro model's status on one environment, and the one action that changes it. */
+function speechModelStatus(state: SpeechState): {
+  readonly label: string;
+  readonly action: "install" | "remove";
+  readonly failed: boolean;
+} {
+  const { install } = state;
+  if (install._tag === "installing") {
+    return { label: `Downloading ${percent(install)}`, action: "install", failed: false };
+  }
+  if (install._tag === "installed") {
+    return {
+      label: `Downloaded (${formatBytes(install.sizeBytes)})`,
+      action: "remove",
+      failed: false,
+    };
+  }
+  if (install._tag === "failed") {
+    return { label: `Failed: ${install.message}`, action: "install", failed: true };
+  }
+  return {
+    label: `Not downloaded (${formatBytes(SPEECH_MODEL_BYTES)})`,
+    action: "install",
+    failed: false,
+  };
+}
+
+/** The speech model's status on one environment, with a Download, Retry or Remove button. */
+function SpeechModelStatus(props: {
+  readonly environmentId: EnvironmentId;
+  /** Names the environment when several are selected. */
+  readonly label: string | null;
+}) {
+  const { state } = useSpeechState(props.environmentId);
+  const canInstall = useAtomValue(speechEnvironment.install.permissionAtom(props.environmentId));
+  const canRemove = useAtomValue(speechEnvironment.remove.permissionAtom(props.environmentId));
+  const install = useAtomCommand(speechEnvironment.install, { reportFailure: false });
+  const remove = useAtomCommand(speechEnvironment.remove, { reportFailure: false });
+  const [busy, setBusy] = useState(false);
+  if (!state?.supported) return null;
+  const status = speechModelStatus(state);
+  const action = status.action;
+  const downloading = state.install._tag === "installing";
+  const canRun = action === "remove" ? canRemove : canInstall;
+
+  return (
+    <span className="flex items-center gap-2 text-xs">
+      <span
+        className={cn("tabular-nums", status.failed ? "text-destructive" : "text-muted-foreground")}
+      >
+        {props.label ? `${props.label}: ${status.label}` : status.label}
+      </span>
+      {downloading ? null : (
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={!canRun || busy}
+          onClick={() => {
+            setBusy(true);
+            const command = action === "remove" ? remove : install;
+            void command({ environmentId: props.environmentId, input: {} }).then((result) => {
+              setBusy(false);
+              if (result._tag === "Failure") {
+                toastManager.add({
+                  type: "error",
+                  title:
+                    action === "remove"
+                      ? "Could not remove the speech model"
+                      : "Could not download the speech model",
+                });
+              }
+            });
+          }}
+        >
+          {action === "remove" ? "Remove" : status.failed ? "Retry" : "Download"}
+        </Button>
+      )}
+    </span>
+  );
+}
+
+/** "am_michael" -> "Michael (US, male)"; the bare "af" voice is Kokoro's default blend. */
+function speechVoiceLabel(name: string): string {
+  const [code, rawName] = name.split("_", 2) as [string, string | undefined];
+  const accent = code.startsWith("b") ? "UK" : "US";
+  const gender = code.endsWith("m") ? "male" : "female";
+  const label = rawName ? rawName.charAt(0).toUpperCase() + rawName.slice(1) : "Default";
+  return `${label} (${accent}, ${gender})`;
+}
+
+/**
+ * Read aloud for the environments selected in the settings header. Turning it on is what lets
+ * assistant replies be spoken; the model is downloaded per machine, and voice and speed apply to
+ * replies synthesized after they change. Changing settings needs settings:write; downloading or
+ * removing the model needs orchestration:operate.
+ */
+export function ReadAloudSettingsSection() {
+  const { scope, environment, connectedEnvironments } = useSettingsScope();
+  const environmentId =
+    environment?.connection.phase === "connected" && environment.serverConfig !== null
+      ? environment.environmentId
+      : null;
+  const { state, error } = useSpeechState(environmentId);
+  // A server from before speech has no speech methods, so its subscription fails outright.
+  const outdated = environmentId !== null && state === null && error !== null;
+  const updateSettings = useUpdateScopedSettings();
+  const canConfigure = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
+  const projectScope = scope.kind === "project" || scope.kind === "checkout";
+  const unsupported = state?.supported === false || outdated;
+  const locked = !canConfigure || projectScope || environmentId === null || unsupported;
+  const enabled = useScopedSettings((unified) => unified.speechEnabled);
+  const voice = useScopedSettings((unified) => unified.speechVoice);
+  const speed = useScopedSettings((unified) => unified.speechSpeed);
+  const speedRatio = (speed - SPEECH_MIN_SPEED) / (SPEECH_MAX_SPEED - SPEECH_MIN_SPEED);
+  const speedSliderStyle = {
+    "--settings-slider-progress": `${speedRatio * 100}%`,
+    "--settings-slider-fill-offset": `${0.5 - speedRatio}rem`,
+  } as CSSProperties;
+
+  return (
+    <SettingsSection id="read-aloud" title="Read aloud">
+      <SettingsRow
+        {...searchableSetting("read-aloud-enabled")}
+        serverScoped
+        settingKeys={["speechEnabled"]}
+        description={
+          outdated
+            ? "Update T3 Code on this machine to use read aloud."
+            : unsupported
+              ? "This environment's platform has no supported speech model."
+              : "Speak assistant replies with a local voice model; nothing is sent to another service."
+        }
+        control={
+          <ScopedSwitch
+            settingKeys={["speechEnabled"]}
+            checked={enabled}
+            disabled={locked}
+            aria-label="Read aloud"
+            onCheckedChange={(checked) => updateSettings({ speechEnabled: checked })}
+          />
+        }
+      />
+      {unsupported ? null : (
+        <>
+          <SettingsRow
+            title="Speech model"
+            serverScoped
+            settingKeys={["speechEnabled"]}
+            description="The local voice model, downloaded separately on each machine that reads aloud."
+            status={connectedEnvironments.map((target) => (
+              <SpeechModelStatus
+                key={target.environmentId}
+                environmentId={target.environmentId}
+                label={connectedEnvironments.length > 1 ? target.label : null}
+              />
+            ))}
+          />
+          <SettingsRow
+            {...searchableSetting("read-aloud-voice")}
+            serverScoped
+            settingKeys={["speechVoice"]}
+            description="The model's speaker; a new voice applies to replies spoken after it is picked."
+            control={
+              <Select
+                items={SPEECH_VOICES.map((option) => ({
+                  value: String(option.id),
+                  label: speechVoiceLabel(option.name),
+                }))}
+                value={String(voice)}
+                disabled={locked || !enabled}
+                onValueChange={(value) => {
+                  if (value !== null) updateSettings({ speechVoice: Number(value) });
+                }}
+              >
+                <SelectTrigger size="xs" className="w-44" aria-label="Read aloud voice">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  {SPEECH_VOICES.map((option) => (
+                    <SelectItem key={option.id} value={String(option.id)}>
+                      {speechVoiceLabel(option.name)}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            }
+          />
+          <SettingsRow
+            {...searchableSetting("read-aloud-speed")}
+            serverScoped
+            settingKeys={["speechSpeed"]}
+            description="Playback pace, applied when a reply is synthesized."
+            control={
+              <div className="flex w-full items-center gap-3 sm:w-52">
+                <output
+                  className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
+                  htmlFor="read-aloud-speed-range"
+                >
+                  {Number(speed.toFixed(2))}×
+                </output>
+                <input
+                  aria-label="Read aloud speed"
+                  className="settings-slider min-w-0 flex-1"
+                  disabled={locked || !enabled}
+                  id="read-aloud-speed-range"
+                  max={SPEECH_MAX_SPEED}
+                  min={SPEECH_MIN_SPEED}
+                  onChange={(event) => {
+                    const next = Number(event.currentTarget.value);
+                    if (
+                      Number.isFinite(next) &&
+                      next >= SPEECH_MIN_SPEED &&
+                      next <= SPEECH_MAX_SPEED
+                    ) {
+                      updateSettings({ speechSpeed: next });
+                    }
+                  }}
+                  step={0.05}
+                  style={speedSliderStyle}
+                  type="range"
+                  value={speed}
+                />
+              </div>
+            }
+          />
+        </>
+      )}
+    </SettingsSection>
+  );
 }

@@ -7,6 +7,8 @@ import {
   type DictationRemoveInput,
   type DictationStartResult,
   type EnvironmentId,
+  type SpeechSynthesizeInput,
+  type SpeechSynthesizeResult,
   type VoiceRequestPayload,
   type VoiceRequestResult,
   type VoiceStateEvent,
@@ -199,6 +201,118 @@ export function createDictationEnvironmentAtoms<R, E>(
       unwrapNone,
     ),
   };
+}
+
+/**
+ * Speech atoms for every environment, riding the same `voice.request` method as dictation.
+ * Install and remove run one at a time per environment, like dictation's; warm-up and
+ * synthesis can run concurrently because the server owns its ordering and serializes the
+ * native work itself.
+ */
+export function createSpeechEnvironmentAtoms<R, E>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
+) {
+  const scheduler = createAtomCommandScheduler();
+  const concurrency = {
+    mode: "serial" as const,
+    key: ({ environmentId }: { environmentId: string }) => environmentId,
+  };
+  const serialRequest = createEnvironmentRpcCommand(runtime, {
+    label: VOICE_REQUEST_LABEL,
+    tag: WS_METHODS.voiceRequest,
+    scheduler,
+    concurrency,
+  });
+  const parallelRequest = createEnvironmentRpcCommand(runtime, {
+    label: VOICE_REQUEST_LABEL,
+    tag: WS_METHODS.voiceRequest,
+  });
+
+  /** A caller-facing command built from one shared request wrapper. */
+  const command = <Input, A>(
+    label: string,
+    build: (input: Input) => VoiceRequestPayload,
+    unwrap: (result: VoiceRequestResult) => A,
+    request: typeof parallelRequest = parallelRequest,
+  ) => ({
+    ...createVoiceRequestCommand({ label, request, build, unwrap }),
+    requiredScopes: serialRequest.requiredScopes,
+    permissionAtom: serialRequest.permissionAtom,
+  });
+
+  const voiceState = createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+    label: "environment-data:speech:state",
+    tag: WS_METHODS.subscribeVoiceState,
+    transform: (stream) =>
+      stream.pipe(
+        Stream.filter(
+          (event): event is Extract<VoiceStateEvent, { readonly _tag: "speech" }> =>
+            event._tag === "speech",
+        ),
+        Stream.map((event) => event.state),
+      ),
+  });
+
+  return {
+    /**
+     * Server-pushed speech settings, install progress, and readiness for one environment.
+     * Callers keep passing `{}`: the topic is fixed here.
+     */
+    state: (target: { readonly environmentId: EnvironmentId; readonly input: {} }) =>
+      voiceState({ environmentId: target.environmentId, input: { topic: "speech" } }),
+    /** Starts or retries the Kokoro model download; returns before it completes. */
+    install: command(
+      "environment-data:speech:install",
+      (): VoiceRequestPayload => ({ _tag: "speech.install" }),
+      unwrapNone,
+      serialRequest,
+    ),
+    /** Deletes the downloaded model. */
+    remove: command(
+      "environment-data:speech:remove",
+      (): VoiceRequestPayload => ({ _tag: "speech.remove" }),
+      unwrapNone,
+      serialRequest,
+    ),
+    /** Loads the model ahead of a likely synthesis; a no-op when speech is off or uninstalled. */
+    warm: command(
+      "environment-data:speech:warm",
+      (): VoiceRequestPayload => ({ _tag: "speech.warm" }),
+      unwrapNone,
+    ),
+    /** Renders one 1-1000 character chunk to PCM on the environment. */
+    synthesize: command(
+      "environment-data:speech:synthesize",
+      (input: SpeechSynthesizeInput): VoiceRequestPayload => ({
+        _tag: "speech.synthesize",
+        text: input.text,
+        ...(input.voice === undefined ? {} : { voice: input.voice }),
+        ...(input.speed === undefined ? {} : { speed: input.speed }),
+      }),
+      (result): SpeechSynthesizeResult => {
+        const synthesized = expectVoiceResult(result, "speech.synthesized");
+        return {
+          sampleRate: synthesized.sampleRate,
+          pcm16: synthesized.pcm16,
+          durationMs: synthesized.durationMs,
+        };
+      },
+    ),
+  };
+}
+
+/**
+ * Picks the environment that speaks this device's assistant replies. Speech shares the dictation
+ * machine, so a pinned environment wins while it can speak; otherwise the environment that owns
+ * the thread, then the primary, then any connected environment that can speak.
+ */
+export function resolveSpeechEnvironment(input: {
+  readonly chosen: EnvironmentId | null;
+  readonly draftEnvironmentId: EnvironmentId | null;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly ready: ReadonlyArray<EnvironmentId>;
+}): EnvironmentId | null {
+  return resolveDictationEnvironment(input);
 }
 
 /**
