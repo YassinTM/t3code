@@ -1,7 +1,11 @@
 /**
  * Dictation and speech RPC definitions, kept apart from `rpc.ts` and spread into
- * `WS_METHODS` / `WsRpcGroup` there. Speech synthesis shares the dictation runtime and
- * worker, so its methods ride the same method/scope maps instead of a second spread.
+ * `WS_METHODS` / `WsRpcGroup` there.
+ *
+ * Dictation and speech synthesis share one runtime, worker and settings spread, so they also
+ * share a single transport surface: `voice.request` carries every former per-operation method
+ * as a tagged payload, and `subscribeVoiceState` carries both state streams. Keeping the fork
+ * to two RPC slots keeps the WebSocket RPC group inside TypeScript's instantiation budget.
  *
  * @module DictationRpc
  */
@@ -30,135 +34,87 @@ import {
 } from "./dictation.ts";
 
 export const DICTATION_WS_METHODS = {
-  dictationInstall: "dictation.install",
-  dictationRemove: "dictation.remove",
-  dictationStart: "dictation.start",
-  dictationWarm: "dictation.warm",
-  dictationAppend: "dictation.append",
-  dictationFinish: "dictation.finish",
-  dictationCancel: "dictation.cancel",
-  subscribeDictationState: "subscribeDictationState",
-  speechInstall: "speech.install",
-  speechRemove: "speech.remove",
-  speechWarm: "speech.warm",
-  speechSynthesize: "speech.synthesize",
-  subscribeSpeechState: "subscribeSpeechState",
+  voiceRequest: "voice.request",
+  subscribeVoiceState: "subscribeVoiceState",
 } as const;
 
-const DictationRpcError = Schema.Union([DictationError, EnvironmentAuthorizationError]);
+/**
+ * Every dictation and speech operation, tagged. Each variant carries exactly the fields its
+ * former dedicated RPC took, so the dispatcher can call the same service method unchanged.
+ */
+export const VoiceRequestPayload = Schema.Union([
+  Schema.TaggedStruct("dictation.install", { ...DictationInstallInput.fields }),
+  Schema.TaggedStruct("dictation.remove", { ...DictationRemoveInput.fields }),
+  Schema.TaggedStruct("dictation.start", {}),
+  Schema.TaggedStruct("dictation.warm", {}),
+  Schema.TaggedStruct("dictation.append", { ...DictationAppendInput.fields }),
+  Schema.TaggedStruct("dictation.finish", { ...DictationFinishInput.fields }),
+  Schema.TaggedStruct("dictation.cancel", { ...DictationCancelInput.fields }),
+  Schema.TaggedStruct("speech.install", {}),
+  Schema.TaggedStruct("speech.remove", {}),
+  Schema.TaggedStruct("speech.warm", {}),
+  Schema.TaggedStruct("speech.synthesize", { ...SpeechSynthesizeInput.fields }),
+]);
+export type VoiceRequestPayload = typeof VoiceRequestPayload.Type;
 
-const WsDictationInstallRpc = Rpc.make(DICTATION_WS_METHODS.dictationInstall, {
-  payload: DictationInstallInput,
-  error: DictationRpcError,
+/**
+ * Success shape of `voice.request`: every former result spread under its own tag, and `none`
+ * for the operations that returned nothing. No variant is wrapped, so a result is the tagged
+ * value itself and the dispatcher returns it directly.
+ */
+export const VoiceRequestResult = Schema.Union([
+  Schema.TaggedStruct("none", {}),
+  Schema.TaggedStruct("dictation.started", { ...DictationStartResult.fields }),
+  Schema.TaggedStruct("dictation.finished", { ...DictationFinishResult.fields }),
+  Schema.TaggedStruct("speech.synthesized", { ...SpeechSynthesizeResult.fields }),
+]);
+export type VoiceRequestResult = typeof VoiceRequestResult.Type;
+
+/** The tagged result every former void operation answers with. */
+export const VOICE_REQUEST_NONE = { _tag: "none" } as const satisfies VoiceRequestResult;
+
+/** Which state stream a `subscribeVoiceState` subscriber wants. */
+export const VoiceStateTopic = Schema.Literals(["dictation", "speech"]);
+export type VoiceStateTopic = typeof VoiceStateTopic.Type;
+
+/** One state push, tagged so a client can tell the two streams apart by construction. */
+export const VoiceStateEvent = Schema.Union([
+  Schema.TaggedStruct("dictation", { state: DictationState }),
+  Schema.TaggedStruct("speech", { state: SpeechState }),
+]);
+export type VoiceStateEvent = typeof VoiceStateEvent.Type;
+
+const VoiceRequestError = Schema.Union([
+  DictationError,
+  SpeechError,
+  EnvironmentAuthorizationError,
+]);
+
+const WsVoiceRequestRpc = Rpc.make(DICTATION_WS_METHODS.voiceRequest, {
+  payload: VoiceRequestPayload,
+  success: VoiceRequestResult,
+  error: VoiceRequestError,
 });
 
-const WsDictationRemoveRpc = Rpc.make(DICTATION_WS_METHODS.dictationRemove, {
-  payload: DictationRemoveInput,
-  error: DictationRpcError,
-});
-
-const WsDictationStartRpc = Rpc.make(DICTATION_WS_METHODS.dictationStart, {
-  payload: Schema.Struct({}),
-  success: DictationStartResult,
-  error: DictationRpcError,
-});
-
-/** Starts loading the speech model ahead of a likely dictation; a no-op when dictation is off. */
-const WsDictationWarmRpc = Rpc.make(DICTATION_WS_METHODS.dictationWarm, {
-  payload: Schema.Struct({}),
-  error: EnvironmentAuthorizationError,
-});
-
-const WsDictationAppendRpc = Rpc.make(DICTATION_WS_METHODS.dictationAppend, {
-  payload: DictationAppendInput,
-  error: DictationRpcError,
-});
-
-const WsDictationFinishRpc = Rpc.make(DICTATION_WS_METHODS.dictationFinish, {
-  payload: DictationFinishInput,
-  success: DictationFinishResult,
-  error: DictationRpcError,
-});
-
-const WsDictationCancelRpc = Rpc.make(DICTATION_WS_METHODS.dictationCancel, {
-  payload: DictationCancelInput,
-  error: DictationRpcError,
-});
-
-const WsSubscribeDictationStateRpc = Rpc.make(DICTATION_WS_METHODS.subscribeDictationState, {
-  payload: Schema.Struct({}),
-  success: DictationState,
-  error: EnvironmentAuthorizationError,
-  stream: true,
-});
-
-const SpeechRpcError = Schema.Union([SpeechError, EnvironmentAuthorizationError]);
-
-/** Starts or retries the Kokoro model download; returns before it completes. */
-const WsSpeechInstallRpc = Rpc.make(DICTATION_WS_METHODS.speechInstall, {
-  payload: Schema.Struct({}),
-  error: SpeechRpcError,
-});
-
-/** Reclaims the installed Kokoro model, unloading it first. */
-const WsSpeechRemoveRpc = Rpc.make(DICTATION_WS_METHODS.speechRemove, {
-  payload: Schema.Struct({}),
-  error: SpeechRpcError,
-});
-
-/** Loads the model ahead of a likely synthesis; a no-op when speech is off or uninstalled. */
-const WsSpeechWarmRpc = Rpc.make(DICTATION_WS_METHODS.speechWarm, {
-  payload: Schema.Struct({}),
-  error: EnvironmentAuthorizationError,
-});
-
-const WsSpeechSynthesizeRpc = Rpc.make(DICTATION_WS_METHODS.speechSynthesize, {
-  payload: SpeechSynthesizeInput,
-  success: SpeechSynthesizeResult,
-  error: SpeechRpcError,
-});
-
-const WsSubscribeSpeechStateRpc = Rpc.make(DICTATION_WS_METHODS.subscribeSpeechState, {
-  payload: Schema.Struct({}),
-  success: SpeechState,
+const WsSubscribeVoiceStateRpc = Rpc.make(DICTATION_WS_METHODS.subscribeVoiceState, {
+  payload: Schema.Struct({ topic: VoiceStateTopic }),
+  success: VoiceStateEvent,
   error: EnvironmentAuthorizationError,
   stream: true,
 });
 
-export const DictationRpcs = [
-  WsDictationInstallRpc,
-  WsDictationRemoveRpc,
-  WsDictationStartRpc,
-  WsDictationWarmRpc,
-  WsDictationAppendRpc,
-  WsDictationFinishRpc,
-  WsDictationCancelRpc,
-  WsSubscribeDictationStateRpc,
-  WsSpeechInstallRpc,
-  WsSpeechRemoveRpc,
-  WsSpeechWarmRpc,
-  WsSpeechSynthesizeRpc,
-  WsSubscribeSpeechStateRpc,
-] as const;
+export const DictationRpcs = [WsVoiceRequestRpc, WsSubscribeVoiceStateRpc] as const;
 
-/** Client-guarded scopes (the subscriptions are not guarded client-side). */
+/**
+ * Client-guarded scopes (the subscriptions are not guarded client-side). Every former
+ * operation was guarded by operate scope, so the single request method is too.
+ */
 export const DICTATION_CLIENT_GUARDED_RPC_SCOPES = {
-  [DICTATION_WS_METHODS.dictationInstall]: AuthOrchestrationOperateScope,
-  [DICTATION_WS_METHODS.dictationRemove]: AuthOrchestrationOperateScope,
-  [DICTATION_WS_METHODS.dictationStart]: AuthOrchestrationOperateScope,
-  [DICTATION_WS_METHODS.dictationWarm]: AuthOrchestrationOperateScope,
-  [DICTATION_WS_METHODS.dictationAppend]: AuthOrchestrationOperateScope,
-  [DICTATION_WS_METHODS.dictationFinish]: AuthOrchestrationOperateScope,
-  [DICTATION_WS_METHODS.dictationCancel]: AuthOrchestrationOperateScope,
-  [DICTATION_WS_METHODS.speechInstall]: AuthOrchestrationOperateScope,
-  [DICTATION_WS_METHODS.speechRemove]: AuthOrchestrationOperateScope,
-  [DICTATION_WS_METHODS.speechWarm]: AuthOrchestrationOperateScope,
-  [DICTATION_WS_METHODS.speechSynthesize]: AuthOrchestrationOperateScope,
+  [DICTATION_WS_METHODS.voiceRequest]: AuthOrchestrationOperateScope,
 } as const;
 
 /** Scopes the server requires for every dictation and speech method. */
 export const DICTATION_RPC_REQUIRED_SCOPES = {
   ...DICTATION_CLIENT_GUARDED_RPC_SCOPES,
-  [DICTATION_WS_METHODS.subscribeDictationState]: AuthOrchestrationReadScope,
-  [DICTATION_WS_METHODS.subscribeSpeechState]: AuthOrchestrationReadScope,
+  [DICTATION_WS_METHODS.subscribeVoiceState]: AuthOrchestrationReadScope,
 } as const;

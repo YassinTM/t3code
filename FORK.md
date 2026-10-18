@@ -57,6 +57,13 @@ Put new features in new files where possible and hook them in with small edits.
   so no extra upstream hooks. Code in `apps/server/src/speech/` and
   `packages/contracts/src/speech.ts`.
 
+**RPC budget:** upstream's WebSocket RPC group sits at TypeScript's instantiation
+limit (`TS2589 excessively deep` in `ws.ts`, depending on checker count). All fork
+voice features share exactly two RPCs, `voice.request` (tagged union of actions)
+and `subscribeVoiceState` (by topic), in `contracts/src/dictationRpc.ts`. Add new
+actions as tags there; never add new RPC methods. Release builds typecheck the
+server with `--checkers 8` as extra margin.
+
 ## Setup (once)
 
 - Repository secret `FORK_SYNC_TOKEN`: a fine-grained PAT for this repo only,
