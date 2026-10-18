@@ -28,7 +28,11 @@ import {
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
-import { createDictationEnvironmentAtoms, resolveDictationEnvironment } from "./dictation.ts";
+import {
+  createDictationEnvironmentAtoms,
+  resolveDictationEnvironment,
+  resolveSpeechEnvironment,
+} from "./dictation.ts";
 
 vi.mock("./session.ts", () => ({
   createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
@@ -318,6 +322,50 @@ describe("resolveDictationEnvironment", () => {
       resolveDictationEnvironment({
         chosen: laptop,
         draftEnvironmentId: server,
+        primaryEnvironmentId: laptop,
+        ready: [],
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("resolveSpeechEnvironment", () => {
+  it("shares the dictation machine: the pinned environment wins while it can speak", () => {
+    expect(
+      resolveSpeechEnvironment({
+        chosen: studio,
+        draftEnvironmentId: laptop,
+        primaryEnvironmentId: laptop,
+        ready: [laptop, studio],
+      }),
+    ).toBe(studio);
+  });
+
+  it("falls back to the thread's environment, then the primary, then any speaking one", () => {
+    const resolve = (ready: ReadonlyArray<EnvironmentId>) =>
+      resolveSpeechEnvironment({
+        chosen: studio,
+        draftEnvironmentId: server,
+        primaryEnvironmentId: laptop,
+        ready,
+      });
+    expect(resolve([laptop, server])).toBe(server);
+    expect(resolve([laptop])).toBe(laptop);
+    expect(
+      resolveSpeechEnvironment({
+        chosen: null,
+        draftEnvironmentId: server,
+        primaryEnvironmentId: null,
+        ready: [studio],
+      }),
+    ).toBe(studio);
+  });
+
+  it("returns null when no connected environment can speak", () => {
+    expect(
+      resolveSpeechEnvironment({
+        chosen: laptop,
+        draftEnvironmentId: laptop,
         primaryEnvironmentId: laptop,
         ready: [],
       }),
