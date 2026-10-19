@@ -801,8 +801,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     });
   }, [latestRun, listIdentityKey]);
 
-  // Find the fold that hides the match: imported turns have no run id but still
-  // fold under a synthetic key, so the match's own run id cannot open them.
+  // Imported turns fold under synthetic keys rather than the entries' own run ids.
   const findFoldRunIds = findActive
     ? timelineTurnFoldRunIdsByEntryId({
         timelineEntries,
@@ -812,9 +811,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
         runlessWorkActive,
       })
     : null;
-  const activeFindRunId = activeFindMatch
-    ? findFoldRunIds?.get(activeFindMatch.entryId)
-    : undefined;
+  const activeFindRunId =
+    findActive && activeFindMatch ? findFoldRunIds?.get(activeFindMatch.entryId) : undefined;
   const [expandedFindRunId, setExpandedFindRunId] = useState<RunId | undefined>();
   if (expandedFindRunId !== activeFindRunId) {
     setExpandedFindRunId(activeFindRunId);
@@ -1004,6 +1002,17 @@ const ConversationTimeline = memo(function ConversationTimeline({
     viewport: timelineViewportElement,
     historyLoading: citationHistoryLoading,
     loadEarlier,
+    getTurnFoldRunId: (entryId) =>
+      (
+        findFoldRunIds ??
+        timelineTurnFoldRunIdsByEntryId({
+          timelineEntries,
+          latestRun,
+          runningRunId,
+          isWorking,
+          runlessWorkActive,
+        })
+      ).get(entryId),
     onExpandTurn: expandCitedRun,
     onManualNavigation,
   });
