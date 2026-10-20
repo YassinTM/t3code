@@ -21,7 +21,6 @@ import { rpcInitialItems } from "./rpcInitialItems.ts";
 import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
 import { subscribeCodexAuthCallback } from "./provider/CodexAuthCallback.ts";
 import {
-  DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
   AcpRegistryOperationError,
   CommandId,
   authScopeResponse,
@@ -100,7 +99,6 @@ import {
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
-import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import {
   HttpRouter,
   HttpServerRequest,
@@ -168,6 +166,7 @@ import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRe
 import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
 import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import { latestProviderVersionCacheKeys } from "@t3tools/provider-core/server/maintenanceResolver";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ProviderAuthService from "./provider/ProviderAuthService.ts";
 import { makeProviderInstallation } from "./provider/providerInstallation.ts";
@@ -1284,16 +1283,6 @@ const layerWsRpc = (
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
       const sourceControlDiscovery = yield* SourceControlDiscovery.SourceControlDiscovery;
       const otlpEndpointCheck = yield* OtlpEndpointCheck.OtlpEndpointCheck;
-      const automaticGitFetchInterval = serverSettings.getSettings.pipe(
-        Effect.map(
-          (settings) => resolveServerBackgroundActivitySettings(settings).automaticGitFetchInterval,
-        ),
-        Effect.catch((cause) =>
-          Effect.logWarning("Failed to read automatic Git fetch interval setting", {
-            detail: cause.message,
-          }).pipe(Effect.as(DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL)),
-        ),
-      );
       const sourceControlRepositories =
         yield* SourceControlRepositoryService.SourceControlRepositoryService;
       const withPullRequestViewer = pullRequests.withRoutingCredential;
@@ -2176,10 +2165,16 @@ const layerWsRpc = (
                   Effect.gen(function* () {
                     yield* instance.invalidateCaches ?? Effect.void;
                     const maintenance = yield* instance.snapshot.resolveMaintenance({
-                      fresh: true,
+                      fresh:
+                        input.instanceId !== undefined &&
+                        input.cwd !== undefined &&
+                        input.fresh !== true,
                     });
-                    if (maintenance.packageName)
-                      yield* providerLatestVersions.invalidate(maintenance.packageName);
+                    yield* Effect.forEach(
+                      latestProviderVersionCacheKeys(maintenance),
+                      providerLatestVersions.invalidate,
+                      { discard: true },
+                    );
                   }),
                 { concurrency: "unbounded", discard: true },
               );
@@ -2746,10 +2741,7 @@ const layerWsRpc = (
           }),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
           persistChatAttachments(input).pipe(Effect.map((attachments) => ({ attachments }))),
-        [WS_METHODS.subscribeVcsStatus]: (input) =>
-          vcsStatusBroadcaster.streamStatus(input, {
-            automaticRemoteRefreshInterval: automaticGitFetchInterval,
-          }),
+        [WS_METHODS.subscribeVcsStatus]: (input) => vcsStatusBroadcaster.streamStatus(input),
         [WS_METHODS.subscribeWorktreeSetup]: (input) => worktreeSetupTracker.stream(input.threadId),
         [WS_METHODS.worktreeSetupCancel]: (input) =>
           worktreeSetupTracker

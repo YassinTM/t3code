@@ -208,6 +208,40 @@ const hubEnvironment = Effect.fn("LocalDeviceHost.hubEnvironment")(function* (
   const env: NodeJS.ProcessEnv = { ...environment, FORCE_COLOR: "0", NO_COLOR: "1" };
   const platform = yield* HostProcess.Platform;
   const uid = yield* HostProcess.UserId;
+  if (env.ANDROID_HOME) {
+    const path = yield* Path.Path;
+    const runner = yield* ProcessRunner.ProcessRunner;
+    const emulator = path.join(
+      env.ANDROID_HOME,
+      "emulator",
+      platform === "win32" ? "emulator.exe" : "emulator",
+    );
+    const cameraArgs = yield* Effect.forEach(["front", "back"], (facing) =>
+      runner
+        .run({
+          command: emulator,
+          args: [`-help-camera-${facing}`],
+          env,
+          timeout: Duration.seconds(5),
+        })
+        .pipe(
+          Effect.map((result) => {
+            const help = `${result.stdout}\n${result.stderr}`;
+            // The hub wires imagefile cameras unconditionally; older SDK emulators reject that mode.
+            return result.code === 0 && /\bemulated\b/.test(help) && !/\bimagefile\b/.test(help)
+              ? `-camera-${facing} emulated`
+              : "";
+          }),
+          Effect.orElseSucceed(() => ""),
+        ),
+    );
+    const overrides = cameraArgs.filter(Boolean).join(" ");
+    if (overrides) {
+      env.EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS = [overrides, env.EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS]
+        .filter(Boolean)
+        .join(" ");
+    }
+  }
   if (platform === "linux" && env.XDG_RUNTIME_DIR === undefined && uid !== undefined) {
     // SSH sessions may omit the directory where the emulator publishes its gRPC token.
     const runtimeDir = `/run/user/${uid}`;
@@ -237,6 +271,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
   const runner = yield* ProcessRunner.ProcessRunner;
   const httpClient = yield* HttpClient.HttpClient;
   const environment = yield* HostProcess.Environment;
+  const workingDirectory = yield* HostProcess.WorkingDirectory;
   const hostPlatform = yield* HostProcess.Platform;
   const sdk = yield* androidSdk;
   const hostEnvironment = deviceHostEnvironment(environment, sdk.root, hostPlatform, path);
@@ -401,12 +436,15 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
               ...hubPlatformArguments(hostPlatform),
             ],
             {
+              cwd: workingDirectory,
               detached: false,
               shell: false,
               stdout: "pipe",
               stderr: "pipe",
               env: yield* hubEnvironment(hostEnvironment).pipe(
                 Effect.provideService(FileSystem.FileSystem, fs),
+                Effect.provideService(Path.Path, path),
+                Effect.provideService(ProcessRunner.ProcessRunner, runner),
                 Effect.provideService(HostProcess.Platform, hostPlatform),
               ),
             },
@@ -766,6 +804,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
               )
             : command,
         args,
+        cwd: workingDirectory,
         env: hostEnvironment,
         timeout: Duration.millis(options?.timeoutMs ?? 20_000),
         timeoutBehavior: "timedOutResult",
@@ -775,7 +814,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
         Effect.map((result) => ({
           stdout: result.stdout,
           stderr: result.stderr,
-          code: Number(result.code),
+          code: result.timedOut ? 124 : Number(result.code ?? 127),
         })),
         Effect.catch((cause) => Effect.succeed({ stdout: "", stderr: String(cause), code: 127 })),
       );

@@ -81,6 +81,7 @@ import Animated, {
   useAnimatedReaction,
   useAnimatedStyle,
   useDerivedValue,
+  useReducedMotion,
   useSharedValue,
   withTiming,
 } from "react-native-reanimated";
@@ -694,6 +695,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const userInputCardProgress = useSharedValue(1);
   const userInputInsetProgress = useSharedValue(1);
   const userInputCardCoverage = useSharedValue(0);
+  const composerPopoverHeight = useSharedValue(0);
   const floatingControlCoverage = useSharedValue(
     showFloatingStatus ? FLOATING_WORKING_CONTROL_COVERAGE : 0,
   );
@@ -720,12 +722,22 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     },
     [userInputCoverageApplies],
   );
+  const composerPopoverLift = useDerivedValue(() =>
+    withTiming(
+      !composerSlotHidden && composerPopoverHeight.value > 0 ? composerPopoverHeight.value + 8 : 0,
+      { duration: 180, easing: Easing.out(Easing.cubic), reduceMotion: ReduceMotion.System },
+    ),
+  );
   const floatingControlLift = useDerivedValue(
     () =>
-      userInputCoverageApplies ? userInputCardProgress.value * userInputCardCoverage.value : 0,
+      Math.max(
+        userInputCoverageApplies ? userInputCardProgress.value * userInputCardCoverage.value : 0,
+        composerPopoverLift.value,
+      ),
     [userInputCoverageApplies],
   );
   const { freeze, scrollMessageToEnd } = useKeyboardScrollToEnd({ listRef });
+  const reduceMotion = useReducedMotion();
   // Repin timers fire after the render that scheduled them, so they read follow
   // state from the ref the writers below keep in step with it.
   const endFollowEnabledRef = useRef(true);
@@ -895,7 +907,10 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
           ) {
             return;
           }
-          return scrollMessageToEnd({ animated: true, closeKeyboard: false });
+          return scrollMessageToEnd({
+            animated: !reduceMotion,
+            closeKeyboard: false,
+          });
         })
         .catch(() => {
           if (
@@ -916,6 +931,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     contentPresentationKind,
     props.queuedMessages,
     selectedThreadFeed,
+    reduceMotion,
     scrollMessageToEnd,
     selectedThreadKey,
   ]);
@@ -981,7 +997,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
 
   const handleScrollToEnd = () => {
     void Haptics.selectionAsync();
-    void scrollMessageToEnd({ animated: true, closeKeyboard: false }).catch(() => {
+    void scrollMessageToEnd({ animated: !reduceMotion, closeKeyboard: false }).catch(() => {
       freeze.set(false);
     });
   };
@@ -1121,7 +1137,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
           style={{ position: "absolute", bottom: 0, left: 0, right: 0, top: 0 }}
           offset={{ closed: 0, opened: 0 }}
         >
-          <ComposerPopoverHost hidden={composerSlotHidden}>
+          <ComposerPopoverHost hidden={composerSlotHidden} popoverHeight={composerPopoverHeight}>
             {/* The fixed sticky host gives this bottom-anchored child a stable
               coordinate space. Its top and height can then animate together
               instead of the auto-sized host jumping to Yoga's destination. */}

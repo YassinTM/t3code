@@ -498,6 +498,18 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   }
 }
 
+// Validate before resolving the request: adapters may otherwise coerce unusable answers.
+const decodeUserInputAnswers = Schema.decodeUnknownEffect(
+  Schema.Record(
+    Schema.String,
+    Schema.Union([
+      Schema.String,
+      Schema.Array(Schema.String),
+      Schema.Struct({ answers: Schema.Array(Schema.String) }),
+    ]),
+  ),
+);
+
 function pendingThreadTitleGenerationEffect(
   commandId: CommandId,
   threadId: ThreadId,
@@ -569,6 +581,9 @@ function legacyPullRequestLink(
       linkedAt: DateTime.formatIso(now),
       snapshot: null,
       stack: null,
+      ...(existing?.repositoryWebUrl !== undefined && {
+        repositoryWebUrl: existing.repositoryWebUrl,
+      }),
       ...(existing?.endedWatch && { endedWatch: existing.endedWatch }),
     },
     existing?.watch,
@@ -2889,7 +2904,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             pinnedAt: null,
             pinOrderKey: null,
             activeOrderKey: null,
-            updatedAt: alreadySettled ? thread.updatedAt : now,
+            snoozedUntil: null,
+            snoozedAt: null,
+            updatedAt:
+              alreadySettled && thread.snoozedUntil == null && thread.snoozedAt == null
+                ? thread.updatedAt
+                : now,
           };
         }
         case "thread.unsettle": {
@@ -3065,10 +3085,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               command.source !== "stack-dismissed";
             if (existing && !undismisses) return thread;
             const link = existing
-              ? { ...existing, source: command.source, url: command.url }
+              ? {
+                  ...existing,
+                  source: command.source,
+                  url: command.url,
+                  ...(command.repositoryWebUrl !== undefined && {
+                    repositoryWebUrl: command.repositoryWebUrl,
+                  }),
+                }
               : {
                   ...key,
                   url: command.url,
+                  ...(command.repositoryWebUrl !== undefined && {
+                    repositoryWebUrl: command.repositoryWebUrl,
+                  }),
                   source: command.source,
                   linkedAt: DateTime.formatIso(now),
                   snapshot: null,
@@ -3162,6 +3192,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   {
                     ...key,
                     url: command.link.url,
+                    ...((command.link.repositoryWebUrl ?? dismissed?.repositoryWebUrl) !==
+                      undefined && {
+                      repositoryWebUrl:
+                        command.link.repositoryWebUrl ?? dismissed?.repositoryWebUrl,
+                    }),
                     source: command.link.source,
                     linkedAt: startedAt,
                     snapshot: null,
@@ -7491,6 +7526,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Provider session ${providerSessionId} was not found.`,
         });
       }
+      let answers = command.answers;
+      if (runtimeRequest.kind === "user_input" && answers !== undefined) {
+        const decoded = yield* decodeUserInputAnswers(answers).pipe(mapDispatchError(command));
+        answers = Object.fromEntries(
+          Object.entries(decoded).map(([questionId, answer]) => [
+            questionId,
+            typeof answer === "object" && "answers" in answer ? answer.answers : answer,
+          ]),
+        );
+      }
 
       const now = yield* DateTime.now;
       const resolvedRequest = {
@@ -7498,7 +7543,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         status: "resolved" as const,
         resolvedAt: now,
         ...(command.decision === undefined ? {} : { decision: command.decision }),
-        ...(command.answers === undefined ? {} : { answers: command.answers }),
+        ...(answers === undefined ? {} : { answers }),
       };
       const emitEvent = emit(events, command);
       const requestNode = context.node;
@@ -7557,11 +7602,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           occurredAt: now,
           payload: {
             ...approvalTurnItem,
-            ...(approvalTurnItem.type === "user_input_request" && command.answers !== undefined
+            ...(approvalTurnItem.type === "user_input_request" && answers !== undefined
               ? {
                   questionAnswer: {
                     requestId: command.requestId,
-                    answers: command.answers ?? {},
+                    answers,
                     attachmentsByQuestionId: command.attachmentsByQuestionId ?? {},
                     questionTextById: Object.fromEntries(
                       approvalTurnItem.questions.map((question) => [
@@ -7589,7 +7634,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
         const replies: string[] = [];
         for (const question of approvalTurnItem.questions) {
-          const answer = command.answers?.[question.id];
+          const answer = answers?.[question.id];
           if (typeof answer !== "string" || answer.trim().length === 0) {
             if (question.required === false) continue;
             return yield* new OrchestratorDispatchError({
@@ -7668,7 +7713,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             providerSessionId,
             requestId: command.requestId,
             ...(command.decision === undefined ? {} : { decision: command.decision }),
-            ...(command.answers === undefined ? {} : { answers: command.answers }),
+            ...(answers === undefined ? {} : { answers }),
           },
         } satisfies PendingOrchestrationEffectV2,
       ]);
@@ -8542,6 +8587,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           liveness.set(providerThreadId, live);
           return live;
         });
+      const stillReportsBackgroundWork = Effect.fnUntraced(function* (
+        providerThread: OrchestrationV2ProviderThread,
+      ) {
+        if (providerThread.providerSessionId == null) return false;
+        const session = yield* providerSessions
+          .get(providerThread.providerSessionId)
+          .pipe(Effect.orElseSucceed(() => Option.none()));
+        if (
+          Option.isNone(session) ||
+          session.value.hasPendingBackgroundWorkForThread === undefined
+        ) {
+          return false;
+        }
+        return yield* session.value
+          .hasPendingBackgroundWorkForThread(providerThread)
+          // A failed probe cannot confirm that the work ended.
+          .pipe(Effect.catchCause(() => Effect.succeed(true)));
+      });
       for (const item of pendingBackgroundTurnItems({
         turnItems: input.projection.turnItems,
         runs: input.projection.runs,
@@ -8644,10 +8707,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       }
       for (const providerThread of input.projection.providerThreads) {
-        if (
-          (providerThread.pendingBackgroundTasks?.length ?? 0) === 0 ||
-          (yield* hasLiveSession(providerThread.id))
-        ) {
+        if ((providerThread.pendingBackgroundTasks?.length ?? 0) === 0) continue;
+        if (providerThread.id === input.stoppedProviderThreadId) {
+          // A refused newer start can take ownership and reject the stopped
+          // turn's roster clear. Reconcile it without hiding surviving work.
+          if (yield* stillReportsBackgroundWork(providerThread)) continue;
+        } else if (yield* hasLiveSession(providerThread.id)) {
           continue;
         }
         yield* emitEvent({
@@ -9340,14 +9405,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               now,
             })
           : Effect.gen(function* () {
-              yield* disposeDelegatedCompletionCohort({
-                command,
-                events,
-                projection: yield* getProjectionWithPendingEvents(command.threadId, events),
-                parentRunId: completionCohortRunId,
-                disposition: "stopped",
-                now,
-              });
+              for (const parentRunId of new Set([completionCohortRunId, run.id])) {
+                yield* disposeDelegatedCompletionCohort({
+                  command,
+                  events,
+                  projection: yield* getProjectionWithPendingEvents(command.threadId, events),
+                  parentRunId,
+                  disposition: "stopped",
+                  now,
+                });
+              }
             });
 
       const emitEvent = emit(events, command);

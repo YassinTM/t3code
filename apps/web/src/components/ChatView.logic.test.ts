@@ -258,14 +258,14 @@ describe("resolveThreadMetadataUpdateForNextTurn", () => {
     model: "gpt-5.4",
   };
 
-  it("updates a stale local thread branch to the active checkout", () => {
+  it("adopts the checkout branch without clearing the worktree attachment", () => {
     expect(
       resolveThreadMetadataUpdateForNextTurn({
         currentModelSelection: modelSelection,
         currentBranch: "feature/thread",
         nextBranch: "feature/checkout",
       }),
-    ).toEqual({ branch: "feature/checkout", worktreePath: null });
+    ).toEqual({ branch: "feature/checkout" });
   });
 
   it("does not write metadata when the model and branch are unchanged", () => {
@@ -1043,7 +1043,8 @@ describe("resolveThreadSwitchTimeline", () => {
 
   const held = { threadKey: "env-1:thread-a", entries: ["a1", "a2"] };
 
-  it("keeps the previous thread's entries while the next thread is loading", () => {
+  it("leaves an uncached destination empty while its history loads", () => {
+    rememberReadyThreadTimeline(held);
     expect(
       resolveThreadSwitchTimeline({
         loading: true,
@@ -1051,7 +1052,7 @@ describe("resolveThreadSwitchTimeline", () => {
         nextEntries: [],
         lastReady: held,
       }),
-    ).toEqual({ entries: ["a1", "a2"], displayThreadKey: "env-1:thread-a" });
+    ).toEqual({ entries: [], displayThreadKey: "env-1:thread-b" });
   });
 
   it("shows the new thread once its detail is ready", () => {
@@ -1087,18 +1088,6 @@ describe("resolveThreadSwitchTimeline", () => {
       markdownCwd: "/repo/a",
       workspaceRoot: "/repo/a",
     });
-  });
-
-  it("survives a ChatView remount by remembering the last ready timeline", () => {
-    rememberReadyThreadTimeline(held);
-    expect(peekHeldThreadTimeline<string[]>()).toEqual(held);
-    expect(
-      resolveThreadSwitchTimeline({
-        loading: true,
-        activeThreadKey: "env-1:thread-b",
-        nextEntries: [],
-      }),
-    ).toEqual({ entries: ["a1", "a2"], displayThreadKey: "env-1:thread-a" });
   });
 
   it("paints a remembered destination instead of the last-viewed thread", () => {
