@@ -175,14 +175,13 @@ const make = Effect.gen(function* () {
       return;
     }
     let lastProgress = -Infinity;
-    const report = (state: DictationInstallState) =>
-      Effect.gen(function* () {
-        const now = yield* Clock.currentTimeMillis;
-        if (now - lastProgress >= 250) {
-          yield* progress(state);
-          lastProgress = now;
-        }
-      });
+    const report = Effect.fnUntraced(function* (state: DictationInstallState) {
+      const now = yield* Clock.currentTimeMillis;
+      if (now - lastProgress >= 250) {
+        yield* progress(state);
+        lastProgress = now;
+      }
+    });
     yield* progress({ _tag: "installing", receivedBytes: 0, totalBytes: 0 });
     yield* atomicInstall(path.join(root, "runtime", runtime.directory), (temporary) =>
       Effect.gen(function* () {
@@ -250,14 +249,13 @@ const make = Effect.gen(function* () {
         return;
       }
       let lastProgress = -Infinity;
-      const report: typeof progress = (artifact, state) =>
-        Effect.gen(function* () {
-          const now = yield* Clock.currentTimeMillis;
-          if (now - lastProgress >= 250) {
-            yield* progress(artifact, state);
-            lastProgress = now;
-          }
-        });
+      const report: typeof progress = Effect.fnUntraced(function* (artifact, state) {
+        const now = yield* Clock.currentTimeMillis;
+        if (now - lastProgress >= 250) {
+          yield* progress(artifact, state);
+          lastProgress = now;
+        }
+      });
       const totalBytes = models[model].files.reduce((total, file) => total + file.bytes, 0);
       yield* progress(model, { _tag: "installing", receivedBytes: 0, totalBytes });
       yield* atomicInstall(paths(model).model, (temporary) =>

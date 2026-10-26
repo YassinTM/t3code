@@ -90,44 +90,45 @@ const make = Effect.gen(function* () {
         Effect.catchTags({
           // The worker crashed and took the recognizer with it. The next request respawns it,
           // so rebuild the recognizer once and retry this decode once.
-          SpeechWorkerGone: () =>
-            Effect.gen(function* () {
-              currentLanguage = pinnedLanguage;
-              handleId = yield* open(pinnedLanguage);
-              return yield* worker.decode(handleId, samples, DICTATION_SAMPLE_RATE);
-            }),
+          SpeechWorkerGone: Effect.fn("DictationRecognizer.reload")(function* () {
+            currentLanguage = pinnedLanguage;
+            handleId = yield* open(pinnedLanguage);
+            return yield* worker.decode(handleId, samples, DICTATION_SAMPLE_RATE);
+          }),
         }),
       );
-    const decode = (samples: Float32Array, language: string) =>
-      Effect.gen(function* () {
-        const pinnedLanguage = resolveLanguage(model, language);
-        if (models[model].skipSilence && isQuiet(samples))
-          return { text: "", locale: pinnedLanguage || "en" };
-        const json = yield* transcribe(samples, pinnedLanguage).pipe(
-          Effect.mapError(
-            (cause) =>
-              new DictationError({
-                reason: "transcription-failed",
-                message: "Could not transcribe the recording.",
-                cause,
-              }),
-          ),
-        );
-        const result = yield* decodeResult(json).pipe(
-          // Schema failures can contain transcript fragments, so keep this domain validation error private.
-          Effect.mapError(
-            () =>
-              new DictationError({
-                reason: "transcription-failed",
-                message: "The dictation runtime returned an invalid result.",
-              }),
-          ),
-        );
-        return {
-          text: models[model].cleanText(result.text),
-          locale: result.lang || pinnedLanguage || "en",
-        };
-      });
+    const decode = Effect.fn("DictationRecognizer.decode")(function* (
+      samples: Float32Array,
+      language: string,
+    ) {
+      const pinnedLanguage = resolveLanguage(model, language);
+      if (models[model].skipSilence && isQuiet(samples))
+        return { text: "", locale: pinnedLanguage || "en" };
+      const json = yield* transcribe(samples, pinnedLanguage).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DictationError({
+              reason: "transcription-failed",
+              message: "Could not transcribe the recording.",
+              cause,
+            }),
+        ),
+      );
+      const result = yield* decodeResult(json).pipe(
+        // Schema failures can contain transcript fragments, so keep this domain validation error private.
+        Effect.mapError(
+          () =>
+            new DictationError({
+              reason: "transcription-failed",
+              message: "The dictation runtime returned an invalid result.",
+            }),
+        ),
+      );
+      return {
+        text: models[model].cleanText(result.text),
+        locale: result.lang || pinnedLanguage || "en",
+      };
+    });
     return {
       decode,
       release: Effect.suspend(() => worker.release(handleId).pipe(Effect.ignore)),

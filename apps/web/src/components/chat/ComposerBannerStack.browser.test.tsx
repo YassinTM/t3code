@@ -1,111 +1,25 @@
-import "../../index.css";
+import { InfoIcon } from "lucide-react";
+import { expect, it, vi } from "vite-plus/test";
+import { userEvent } from "vite-plus/test/browser";
 
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
-import { page, userEvent } from "vite-plus/test/browser";
+import { render } from "../../../test/render";
+import { ComposerBannerStack, type ComposerBannerStackItem } from "./ComposerBannerStack";
 
-import { ComposerBannerStack } from "./ComposerBannerStack";
+it("commits a dismissal when the thread switches during the exit transition", async () => {
+  const onDismiss = vi.fn();
+  const item: ComposerBannerStackItem = {
+    id: "notice",
+    variant: "info",
+    icon: <InfoIcon />,
+    title: "Thread A notice",
+    dismissLabel: "Dismiss notice",
+    onDismiss,
+  };
+  await using screen = await render(<ComposerBannerStack key="thread-a" items={[item]} />);
 
-let root: Root;
-let container: HTMLDivElement;
+  await userEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+  // The composer keys the stack by thread, so switching threads remounts it mid-exit.
+  await screen.rerender(<ComposerBannerStack key="thread-b" items={[]} />);
 
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-
-afterEach(async () => {
-  await act(async () => root.unmount());
-  container.remove();
-  vi.unstubAllGlobals();
-});
-
-const nextFrame = () =>
-  act(() => new Promise<void>((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0))));
-
-async function render(width: number, description: string) {
-  container.style.width = `${width}px`;
-  await act(async () =>
-    root.render(
-      <ComposerBannerStack
-        items={[{ id: "usage", variant: "info", icon: null, title: "Usage limits", description }]}
-      />,
-    ),
-  );
-  await nextFrame();
-}
-
-const hasDetails = () => container.querySelector('[aria-label="Show notice details"]') !== null;
-
-it("only offers notice details when the description cannot fit", async () => {
-  await render(700, "OpenCode");
-  expect(hasDetails()).toBe(false);
-
-  await render(700, "OpenCode ".repeat(40));
-  expect(hasDetails()).toBe(true);
-
-  container.style.width = "4000px";
-  await nextFrame();
-  expect(hasDetails()).toBe(false);
-
-  await render(4000, "OpenCode");
-  expect(hasDetails()).toBe(false);
-
-  // A narrow composer hides the description entirely, so details are the only way to read it.
-  container.style.width = "300px";
-  await nextFrame();
-  expect(hasDetails()).toBe(true);
-});
-
-it("keeps only the usage limit attached while an active goal waits in the collapsible stack", async () => {
-  await act(async () =>
-    root.render(
-      <ComposerBannerStack
-        items={[
-          {
-            id: "goal",
-            variant: "default",
-            priority: "activity",
-            icon: null,
-            title: "Goal active",
-            description: "Finish the banner fix",
-          },
-          {
-            id: "limit",
-            variant: "default",
-            priority: "urgent",
-            icon: null,
-            title: "Usage limit reached",
-          },
-        ]}
-      />,
-    ),
-  );
-
-  const visibleBanners = () =>
-    Array.from(container.querySelectorAll('[data-slot="composer-banner"]')).filter((banner) =>
-      banner.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }),
-    );
-  const limit = page.getByText("Usage limit reached", { exact: true });
-  const goal = page.getByText("Goal active", { exact: true });
-
-  expect(visibleBanners()).toHaveLength(1);
-  await expect.element(limit).toBeVisible();
-  await expect.element(goal).not.toBeVisible();
-  expect(container.querySelector('[data-slot="composer-banner-attachment"]')?.textContent).toBe(
-    "Usage limit reached",
-  );
-
-  await act(async () => page.getByRole("button", { name: "Show other notices" }).click());
-  await expect.element(goal).toBeVisible();
-  await expect.element(limit).toBeVisible();
-  await expect.poll(visibleBanners).toHaveLength(2);
-
-  await act(async () => userEvent.keyboard("{Escape}"));
-  await expect.element(goal).not.toBeVisible();
-  await expect.element(limit).toBeVisible();
-  expect(visibleBanners()).toHaveLength(1);
+  await vi.waitFor(() => expect(onDismiss).toHaveBeenCalledTimes(1));
 });

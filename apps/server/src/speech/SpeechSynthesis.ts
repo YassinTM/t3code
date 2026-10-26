@@ -205,11 +205,10 @@ const make = Effect.gen(function* () {
     yield* progress({ _tag: "not-installed" });
     yield* artifacts.remove.pipe(
       Effect.catchTags({
-        SpeechError: (error) =>
-          Effect.gen(function* () {
-            yield* progress({ _tag: "failed", message: error.message });
-            return yield* error;
-          }),
+        SpeechError: Effect.fn("SpeechSynthesis.failed")(function* (error) {
+          yield* progress({ _tag: "failed", message: error.message });
+          return yield* error;
+        }),
       }),
     );
   }).pipe(lifecycle.withPermit, Effect.uninterruptible);
@@ -238,15 +237,14 @@ const make = Effect.gen(function* () {
   ) {
     return yield* worker.ttsGenerate({ handleId, ...request }).pipe(
       Effect.catchTags({
-        SpeechWorkerGone: () =>
-          Effect.gen(function* () {
-            // The worker crashed and took the handle with it. The remedy is the same as
-            // unloading, but `synthesize` already holds the native permit this call runs under.
-            loadedHandle = null;
-            yield* update((current) => ({ ...current, loaded: false }));
-            const rebuilt = yield* ensureHandle();
-            return yield* worker.ttsGenerate({ handleId: rebuilt, ...request });
-          }),
+        SpeechWorkerGone: Effect.fn("SpeechSynthesis.reload")(function* () {
+          // The worker crashed and took the handle with it. The remedy is the same as
+          // unloading, but `synthesize` already holds the native permit this call runs under.
+          loadedHandle = null;
+          yield* update((current) => ({ ...current, loaded: false }));
+          const rebuilt = yield* ensureHandle();
+          return yield* worker.ttsGenerate({ handleId: rebuilt, ...request });
+        }),
       }),
       Effect.mapError(
         (cause) =>
