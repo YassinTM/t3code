@@ -28,10 +28,7 @@ function wrapInlineMarker(content: string, marker: string): string {
   return `${match?.[1] ?? ""}${marker}${core}${marker}${match?.[3] ?? ""}`;
 }
 
-/**
- * A code element whose pre wrapper fell outside the copied range is still block
- * code, recognizable by its highlighter line spans or embedded newlines.
- */
+// Highlighter spans or newlines identify block code even when its pre wrapper was not copied.
 function isBlockCodeElement(element: Element, content: string): boolean {
   if (content.includes("\n")) return true;
   for (const child of element.childNodes) {
@@ -68,10 +65,14 @@ function resolveCodeBlockLanguage(pre: Element): string | null {
   return declared && declared !== "text" ? declared : null;
 }
 
-function serializeCodeBlock(pre: Element): string {
-  const code = (pre.textContent ?? "").replace(/\n$/, "");
+export function serializeCodeBlockToMarkdown(source: string, language: string | null): string {
+  const code = source.replace(/\n$/, "");
   const fence = codeFenceFor(code);
-  return `${fence}${resolveCodeBlockLanguage(pre) ?? ""}\n${code}\n${fence}\n\n`;
+  return `${fence}${language ?? ""}\n${code}\n${fence}\n\n`;
+}
+
+function serializeCodeBlock(pre: Element): string {
+  return serializeCodeBlockToMarkdown(pre.textContent ?? "", resolveCodeBlockLanguage(pre));
 }
 
 function serializeTableCell(cell: Element): string {
@@ -120,8 +121,7 @@ function serializeListItem(item: Element, ordered: boolean, index: number): stri
   if (!item.querySelector(":scope > p")) {
     content = content.replace(/\n{2,}/g, "\n");
   }
-  // Nested content lines up with the item text, which starts after the bullet;
-  // a task box is part of that text, not of the list marker.
+  // Continuations align after the bullet; task boxes belong to the item text.
   const continuationIndent = " ".repeat(bullet.length);
   const [first = "", ...rest] = content.split("\n");
   return [
@@ -261,9 +261,7 @@ function scanForSoleCodeBlock(node: Node, scan: SoleCodeBlockScan): void {
     }
     if (child.nodeType !== Node.ELEMENT_NODE) continue;
     const element = child as Element;
-    // Mirrors serializeNode's order: an element carrying markdown of its own
-    // still contributes it even when its tag is otherwise skipped, as a file
-    // chip rendered as a button does.
+    // Explicit markdown still counts on skipped tags such as file-chip buttons.
     if (element.hasAttribute("data-markdown-details")) {
       scan.other = true;
       continue;
@@ -293,11 +291,7 @@ function scanForSoleCodeBlock(node: Node, scan: SoleCodeBlockScan): void {
   }
 }
 
-/**
- * A drag that ends on a block's final newline pulls the closing `pre` into the
- * range, so the fragment holds the whole block even though the user only
- * highlighted code.
- */
+// Selecting a block's final newline pulls in its closing pre even when only code was highlighted.
 function soleCodeBlock(container: Node): Element | null {
   const scan: SoleCodeBlockScan = { pre: null, other: false };
   scanForSoleCodeBlock(container, scan);
@@ -360,6 +354,14 @@ export function serializeTableElementToCsv(table: Element): string {
   return lines.join("\n");
 }
 
+function mermaidSourceHtml(source: string) {
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  code.textContent = source.trim();
+  pre.appendChild(code);
+  return pre;
+}
+
 function mathSourceElement(wrapper: Element): Element {
   const code = document.createElement("code");
   code.textContent = wrapper.getAttribute("data-markdown-copy")?.trim() ?? "";
@@ -370,6 +372,10 @@ function mathSourceElement(wrapper: Element): Element {
 }
 
 function sanitizedHtmlFrom(container: Element): string {
+  for (const diagram of container.querySelectorAll("[data-markdown-mermaid]")) {
+    const source = diagram.getAttribute("data-markdown-copy");
+    if (source !== null) diagram.replaceChildren(mermaidSourceHtml(source));
+  }
   for (const wrapper of container.querySelectorAll(MATH_SELECTOR)) {
     wrapper.replaceWith(mathSourceElement(wrapper));
   }
@@ -401,6 +407,17 @@ export function chatMarkdownClipboardPayload(
     const ancestor = range.commonAncestorContainer;
     const ancestorElement =
       ancestor.nodeType === Node.ELEMENT_NODE ? (ancestor as Element) : ancestor.parentElement;
+    const diagramSource = ancestorElement
+      ?.closest("[data-markdown-mermaid]")
+      ?.getAttribute("data-markdown-copy");
+    if (diagramSource != null) {
+      const text = diagramSource.trim();
+      if (!text) continue;
+      texts.push(text);
+      container.replaceChildren(mermaidSourceHtml(diagramSource));
+      htmls.push(sanitizedHtmlFrom(container));
+      continue;
+    }
     // A range inside a formula would clone only KaTeX's glyphs, not the wrapper holding the TeX.
     const math = mathWrapperOf(ancestorElement);
     if (math) {
